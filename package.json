@@ -1,0 +1,28 @@
+{
+  "name": "datamind-doc",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Documentation for DataMind — an all-in-one intelligent assistant powered by LlamaIndex.",
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": "^20.6.0 || >=22.0.0"
+  },
+  "scripts": {
+    "docs:dev": "vuepress dev docs",
+    "docs:dev-clean": "vuepress dev docs --clean-cache --clean-temp",
+    "docs:build": "vuepress build docs --clean-cache --clean-temp",
+    "docs:preview": "http-server docs/.vuepress/dist",
+    "vp-update": "npx vp-update"
+  },
+  "devDependencies": {
+    "@vuepress/bundler-vite": "2.0.0-rc.24",
+    "@vuepress/plugin-redirect": "2.0.0-rc.112",
+    "http-server": "^14.1.1",
+    "sass-embedded": "^1.89.0",
+    "typescript": "^5.8.3",
+    "vue": "^3.5.16",
+    "vuepress": "2.0.0-rc.24",
+    "vuepress-theme-plume": "1.0.0-rc.164"
+  }
+}
