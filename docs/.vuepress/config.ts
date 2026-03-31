@@ -30,10 +30,6 @@ export default defineUserConfig({
     },
   },
 
-  head: [
-    ['link', { rel: 'icon', type: 'image/png', href: '/DataMind-logo.png' }],
-  ],
-
   bundler: viteBundler(),
   shouldPrefetch: false, // 站点较大，页面数量较多时，不建议启用
 

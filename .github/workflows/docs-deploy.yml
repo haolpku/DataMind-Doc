@@ -22,6 +22,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -31,6 +34,9 @@ jobs:
 
       - name: Build docs
         run: npm run docs:build
+
+      - name: Ensure GitHub Pages serves static output
+        run: touch docs/.vuepress/dist/.nojekyll
 
       - uses: actions/upload-pages-artifact@v3
         with:
