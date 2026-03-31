@@ -11,7 +11,7 @@ createTime: 2026/03/23 00:55:54
 
 | 模块 | 功能 | 后端 |
 |------|------|------|
-| **RAG** | 向量语义检索 | Chroma |
+| **RAG** | 向量语义检索，支持多模态（CLIP / VLM 文本化） | Chroma |
 | **GraphRAG** | 知识图谱检索 | NetworkX |
 | **Database** | 自然语言转 SQL | SQLite |
 | **Skills** | 可扩展工具系统 | FunctionTool |

@@ -11,7 +11,7 @@ createTime: 2026/03/23 00:55:54
 
 | Module | Description | Backend |
 |--------|-------------|---------|
-| **RAG** | Semantic vector retrieval | Chroma |
+| **RAG** | Semantic vector retrieval with multimodal support (CLIP / VLM textualization) | Chroma |
 | **GraphRAG** | Knowledge graph retrieval | NetworkX |
 | **Database** | Natural language to SQL | SQLite |
 | **Skills** | Extensible tool system | FunctionTool |
