@@ -1,140 +1,257 @@
 ---
-title: Demo Guide
+title: Demo & tour
 icon: carbon:demo
 permalink: /en/guide/basicinfo/demo/
 createTime: 2026/03/31 16:00:00
 ---
 
-# DataMind Demo Guide
+# Demo & tour
 
-This document provides a curated set of example questions to demonstrate how DataMind's Agent **automatically dispatches** different modules to answer questions. Each question notes which module is expected to run, so you can verify the system behaves as intended.
+This page walks through the live smoke scripts and the full agent. Every example uses the `hello_<cap>_demo` profile so it can't clobber real data.
 
-> How to use: start the Web UI (`python server.py`) or the terminal (`python main.py`), then enter the questions below in order.
-
-## 1. RAG knowledge base retrieval
-
-The RAG module retrieves semantically relevant content from documents under the profile directory.
-
-| # | Example question | Expected behavior |
-|---|------------------|-------------------|
-| 1.1 | `DataMind 支持哪些文档格式？` | Retrieves sample.txt; returns PDF/TXT/MD/DOCX, etc. |
-| 1.2 | `这个项目使用了什么向量数据库？` | Retrieves Chroma-related description |
-| 1.3 | `RAG 检索的核心原理是什么？` | Retrieves description of vectorization + cosine similarity |
-| 1.4 | `LlamaIndex 提供了哪些功能？` | Retrieves data connectors, index structures, query interfaces |
-
-## 2. Multimodal RAG retrieval
-
-Multimodal RAG can extract information from images and use it for retrieval-based Q&A. Switch to the multimodal demo profile first:
+## 0. The one-liner: full agent smoke
 
 ```bash
-DATA_PROFILE=mm_demo IMAGE_EMBEDDING_MODE=vlm_describe python server.py
+DATAMIND__LLM__API_BASE=http://35.220.164.252:3888 \
+DATAMIND__LLM__API_KEY=sk-... \
+python -m datamind.scripts.hello_agent
 ```
 
-The built-in `mm_demo` profile contains mixed text + image data (`data/profiles/mm_demo/`), with three images showing a system architecture diagram, a retrieval strategy comparison bar chart, and a knowledge graph visualization.
+It seeds a profile with a KB, graph, and SQLite, then asks four real questions in Chinese:
 
-| # | Example question | Expected behavior |
-|---|------------------|-------------------|
-| 2.1 | `系统架构有哪几层？每层包含什么组件？` | VLM extracts architecture info from arch.png; answer includes Data Layer / Service Layer / API Gateway, etc. |
-| 2.2 | `哪种检索策略的召回率最高？具体是多少？` | VLM reads bar chart data from chart.png; answer includes Hybrid 91%, etc. |
-| 2.3 | `知识图谱中有哪些实体和关系？` | VLM extracts graph structure from graph.png; answer includes entity/edge counts |
+| Q | Tools the agent picked (autonomously) | Result |
+|---|---|---|
+| Status meeting 什么时候开？ | `memory_recall` → `kb_search` | "周一 14:00 Shanghai time" from `company_handbook.md` |
+| Search platform 负责人是谁？他在哪个城市？ | `kb_search` → `graph_search_entities` → `graph_neighbors` ×2 | "Ann leads Search platform; city is unknown from the graph" (honest — city is in SQLite, not the graph) |
+| 工程部 Shanghai 员工工资加起来是多少？ | `db_query_nl` → `db_list_tables` → `db_describe_table` → `db_query_sql` ×2 | ¥26,000 with a formatted table (recovers after a wrong first SQL) |
+| 帮我记住下周三会议调到周四 | `memory_save` | Persisted with metadata |
 
-> Note: On the first run in multimodal mode, the system calls a VLM API (e.g. GPT-4o) to generate text descriptions for images. Descriptions are cached in the index afterwards.
+Highlights:
+- **Autonomous tool selection** — no hints, no manual routing.
+- **Graceful error recovery** — if NL2SQL generates the wrong column, the agent reads the schema and retries.
+- **Chinese output, English tool names** — the split we designed.
 
-## 3. GraphRAG graph retrieval
+## 1. KB (RAG) — `hello_kb`
 
-The GraphRAG module performs multi-hop reasoning over entities and relations in the knowledge graph.
+```bash
+python -m datamind.scripts.hello_kb
+```
 
-| # | Example question | Expected behavior |
-|---|------------------|-------------------|
-| 3.1 | `DataMind 基于什么框架？` | Graph reasoning: DataMind → based on → LlamaIndex |
-| 3.2 | `DataMind 包含哪些模块？` | Graph reasoning: DataMind → contains modules → RAG/GraphRAG/NL2SQL |
-| 3.3 | `RAG 向量检索使用了什么技术？` | Graph reasoning: RAG vector retrieval → uses technology → Chroma |
-| 3.4 | `LlamaIndex 和 Python 是什么关系？` | Graph reasoning: LlamaIndex → is → Python framework |
+Seeds a two-file corpus (`ai_history.md`, `rag.md`), indexes it with real embeddings, then runs three queries. Example output:
 
-## 4. Database queries
+```
+[hello_kb] indexed: {'pre_chunked': 0, 'raw_chunks': 4, 'total_embedded': 4}
 
-The Database module turns natural language into SQL and runs it against SQLite.
+[hello_kb] Q: When did AI research start?
+  - score=0.033 source='ai_history.md'  'Artificial intelligence research began in the 1950s…'
 
-The demo database currently includes:
+[hello_kb] Q: What is reciprocal rank fusion?
+  - score=0.033 source='rag.md'  'Hybrid retrieval mixes dense vector search with BM25…'
+```
 
-- **employees** table: 8 employees (张三, 李四, 王五, 赵六, 孙七, 周八, 吴九, 郑十)
-- **projects** table: 4 projects (RAG智能助手, 数据分析平台, 移动端App, 品牌推广)
+Strategies are configurable via `DATAMIND__RETRIEVAL__STRATEGY`:
 
-| # | Example question | Expected behavior |
-|---|------------------|-------------------|
-| 4.1 | `工程部有几个人？` | SQL: SELECT COUNT(*) ... WHERE department='工程部' → 4 |
-| 4.2 | `谁的工资最高？` | SQL: ORDER BY salary DESC LIMIT 1 → 孙七 45000 |
-| 4.3 | `北京的员工有哪些？` | SQL: WHERE city='北京' → 张三, 王五, 孙七, 郑十 |
-| 4.4 | `预算超过 20 万的项目有哪些？` | SQL: WHERE budget > 200000 → RAG智能助手, 数据分析平台 |
-| 4.5 | `RAG 智能助手项目的负责人是谁？` | SQL: JOIN employees and projects → 孙七 |
-| 4.6 | `各部门的平均工资是多少？` | SQL: GROUP BY department + AVG(salary) |
+| Strategy | When to use |
+|---|---|
+| `simple` | Cheapest; good baseline |
+| `multi_query` | Ambiguous queries — LLM rewrites into N siblings |
+| `hybrid` | Default; BM25 + vector fused with RRF (best on most corpora) |
 
-## 5. Skills — knowledge skills
+## 2. Graph — `hello_graph`
 
-The Skills knowledge module retrieves procedures and best practices from Markdown files under `data/skills/`.
+```bash
+python -m datamind.scripts.hello_graph
+```
 
-| # | Example question | Expected behavior |
-|---|------------------|-------------------|
-| 5.1 | `数据库备份的最佳策略是什么？` | Retrieves SOP; returns full + incremental backup strategy |
-| 5.2 | `数据库慢查询怎么排查？` | Retrieves SOP; returns slow-query analysis steps |
-| 5.3 | `代码审查应该重点关注什么？` | Retrieves review guide; correctness / quality / security / performance |
-| 5.4 | `Code Review 的反馈应该怎么写？` | Retrieves review guide; MUST / SHOULD / NICE tiers |
-| 5.5 | `数据库故障排查的步骤？` | Retrieves SOP troubleshooting checklist |
+No network. Seeds 8 triples about Ann / Bob / Acme / Shanghai, then demonstrates:
 
-## 6. Skills — tool skills
+- Entity search (case-insensitive + fuzzy)
+- 3-hop traversal: `Ann → Acme → Shanghai → China`
+- Relation filter: pass `["works_at", "located_in", "in_country"]` to restrict edges followed
+- Direction-aware neighbors
+- **Persistence**: the same graph reloads from `storage/hello_graph_demo/graph.json` on next run
 
-Tool skills are Python functions the Agent calls automatically for precise results.
+## 3. Database — `hello_db`
 
-| # | Example question | Expected behavior |
-|---|------------------|-------------------|
-| 6.1 | `现在几点了？` | Calls get_current_time → current date and time |
-| 6.2 | `计算 sqrt(144) + 3^4` | Calls calculator → 12 + 81 = 93 |
-| 6.3 | `100 公里等于多少英里？` | Calls unit_convert → 62.14 miles |
-| 6.4 | `25 摄氏度等于多少华氏度？` | Calls unit_convert → 77°F |
+```bash
+python -m datamind.scripts.hello_db
+```
 
-## 7. Memory — conversation memory
+Creates a SQLite demo (employees + projects), exercises every DB tool:
 
-The Memory module lets the Agent retain conversation context. Use a short sequence of questions to verify it.
+- `db_list_tables` / `db_describe_table`
+- `db_query_sql`: group-by + aggregates
+- **Safeguard**: `DELETE FROM employees` is rejected with `DestructiveSQLError`
+- `db_query_nl`: real NL2SQL via the gateway — generates JOINs and filters
 
-| # | Step | Expected behavior |
-|---|------|---------------------|
-| 7.1 | First ask: `工程部有几个人？` | Normal answer: 4 |
-| 7.2 | Then ask: `他们分别是谁？` | Agent recalls the "工程部" context; returns 张三, 李四, 孙七, 吴九 |
-| 7.3 | Then ask: `其中谁的工资最高？` | Agent uses context; answers: 孙七 45000 |
-| 7.4 | Ask: `我刚才问了什么？` | Agent summarizes prior turns from memory |
+Example:
 
-## 8. Multi-module orchestration
+```
+[hello_db] db_query_sql (group by department):
+  rows=[['Eng', 3, 12666.67], ['Sales', 1, 9000.0], ['HR', 1, 8500.0]]
 
-These prompts may cause the Agent to **invoke multiple tools at once**, showing intelligent dispatch.
+[hello_db] destructive rejected OK: …
 
-| # | Example question | Expected modules |
-|---|------------------|------------------|
-| 8.1 | `DataMind 用了什么技术栈？各模块分别用了什么？` | RAG + GraphRAG |
-| 8.2 | `工资最高的员工负责的是哪个项目？这个项目预算多少，折合多少美元？` | Database + calculator |
-| 8.3 | `数据库出了性能问题，应该怎么排查？先帮我看看当前数据库有哪些表` | Skills + Database |
-| 8.4 | `今天是几号？帮我算一下如果按全量备份策略，30天前的备份应该从哪天开始保留？` | get_current_time + calculator + Skills |
+[hello_db] db_query_nl:
+  generated SQL: SELECT name, salary FROM employees WHERE city='Shanghai' AND department='Eng'
+  rows: [['Ann', 15000], ['Bob', 11000], ['Evan', 15000]]
+```
 
-## 9. Casual chat
+## 4. Skills — `hello_skills`
 
-For these, the Agent answers with the LLM directly and does not need tools.
+```bash
+python -m datamind.scripts.hello_skills
+```
 
-| # | Example question | Expected behavior |
-|---|------------------|-------------------|
-| 9.1 | `你好！` | Greeting |
-| 9.2 | `你能做什么？` | Describes capabilities |
-| 9.3 | `给我讲个笑话` | Generates content directly |
+Discovers every `.claude/skills/<name>/SKILL.md` manifest, indexes them against live embeddings, then searches semantically:
 
-## Recommended demo flow
+```
+skill_search 'how should I review a pull request?'
+  score=0.513  name=code-review
+  score=0.194  name=db-ops-sop
 
-For a full walkthrough, use this order:
+skill_search '慢查询怎么排查'
+  score=0.392  name=db-ops-sop
+  score=0.330  name=code-review
+```
 
-1. **RAG**: ask `DataMind 支持哪些文档格式？`
-2. **Multimodal RAG**: switch to `mm_demo` profile, ask `系统架构有哪几层？`
-3. **GraphRAG**: ask `DataMind 包含哪些模块？`
-4. **Database**: ask `谁的工资最高？`
-5. **Skills**: ask `数据库备份的最佳策略是什么？`
-6. **Tool**: ask `现在几点了？`
-7. **Memory**: ask `工程部有几个人？` then `他们分别是谁？`
-8. **Orchestration**: ask `工资最高的员工负责哪个项目？预算折合多少美元？`
+Also exercises the code skills: `calculator("2 * (3 + sqrt(16))") → 14`, `100°C → 212°F`.
 
-> Tip: in the Web UI, open the right-hand panel to watch module status change as you ask questions.
+## 5. Memory — `hello_memory`
+
+```bash
+python -m datamind.scripts.hello_memory
+```
+
+Shows all three layers:
+
+- Short-term rolling window (in-memory FIFO)
+- Long-term SQLite + cosine recall
+- LLM fact extraction:
+
+```
+[hello_memory] extracted 2 fact(s):
+  - User is moving to Shenzhen next month
+  - User plans to start jogging in the morning
+```
+
+from the raw turn "I'm moving to Shenzhen next month and will start jogging in the morning."
+
+## 6. Enterprise demo — `hello_enterprise` (recommended)
+
+The flagship v0.2 demo: a **medium-sized realistic profile** + 8 cross-backend complex questions.
+
+### 6.1 Seed once
+
+```bash
+python -m datamind.scripts.seed_enterprise_demo
+```
+
+Sets up:
+- **17 KB documents** (employee handbook, security policy, incident SOP, 3 product architectures, API ref, quarterly retros, OKRs, culture…)
+- **64 graph nodes / 91 edges** (org chart / project deps / product components / incident → service)
+- **6 SQL tables / 101 rows** (departments / employees / projects / project_members / incidents / performance_reviews)
+
+### 6.2 Run 8 cross-backend questions
+
+```bash
+DATAMIND__DATA__PROFILE=enterprise_demo \
+  python -m datamind.scripts.hello_enterprise
+```
+
+Coverage:
+
+| Question | Capabilities exercised |
+|---|---|
+| What's the deploy window? what's the pre-deploy checklist? | KB multi-doc |
+| 2025 Q4 incidents on Search Platform? responder H2 perf scores? | DB (incidents + performance_reviews) |
+| AI Copilot's product dependencies? owners' cities? | Graph multi-hop + DB |
+| Engineers with 2025 H2 perf > 4.0 — what in_progress projects do they own? | DB JOINs |
+| Tell me everything about Frank | KB + DB + Graph |
+| Code review best practices? | Skills |
+| Add "Wednesday deep-work block" to the KB | Ingest (KB write) |
+| Remember I'm on PTO next Monday for a checkup | Memory |
+
+8/8 correct on both backends in a verified run:
+
+| Backend | Total tool calls | Total time |
+|---|---|---|
+| `native` (default) | 34 | 194s |
+| `sdk` + CCR | 38 | 283s |
+
+## 7. Ingest demo — talk to write
+
+In `enterprise_demo`, the agent has 4 extra tools that **write** to KB / DB / Graph mid-conversation:
+
+```bash
+python -m datamind chat
+# or open http://127.0.0.1:8000 in a browser
+```
+
+Try:
+
+```
+"add /Users/foo/policy.md to the knowledge base"
+  → agent calls kb_add_file, immediately retrievable via kb_search
+
+"import /Users/foo/customers.csv as table customers"
+  → agent calls db_import_csv, immediately queryable via db_query_sql
+
+"陈诚 was promoted to Tech Lead, reports to Ann, owns Project Kepler"
+  → agent calls graph_add_triples_from_text, LLM extracts triples, graph upserts
+```
+
+Six sample files live in `demo-uploads/` — drag any into the browser dropzone to see the full pipeline. See [Install §7b](../basicinfo/install/) and [Ingest module](../modules/ingest/).
+
+## Full agent in an interactive REPL
+
+```bash
+python -m datamind chat
+```
+
+```
+╭──── Chat ─────╮
+│ DataMind ready · profile=default · model=claude-sonnet-4-6
+│ tools=23 · kb_chunks=0 · graph_triples=0 · skills=2
+╰───────────────╯
+you › How should I run a code review?
+ai  › [tool skill_search] {"query":"code review process"}
+     [result ok] {"count":1, "results":[{"name":"code-review", …}]}
+     [tool skill_get] {"name":"code-review"}
+     …
+```
+
+Commands: `/new` resets history, `/exit` or `Ctrl-D` leaves.
+
+## HTTP server
+
+```bash
+python -m uvicorn datamind.server:app --port 8000
+```
+
+Streaming example:
+
+```bash
+curl -N -X POST localhost:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Tell me the Status meeting time."}'
+```
+
+```
+data: {"type": "text", "delta": "根据"}
+data: {"type": "text", "delta": "公司"}
+data: {"type": "tool_use", "name": "kb_search", "input": {"query": "Status meeting time"}, "id": "toolu_…"}
+data: {"type": "tool_result", "name": "kb_search", "is_error": false, "preview": "…"}
+data: {"type": "text", "delta": "周一"}
+…
+data: {"type": "done", "iterations": 3, "stop_reason": "end_turn"}
+```
+
+## Verify the whole test suite
+
+```bash
+pytest datamind/tests/
+# 95 passed in ~0.6s
+```
+
+No network is required for unit tests — they use in-memory fakes and temp SQLite. Live tests are reserved for the `hello_*.py` smokes.

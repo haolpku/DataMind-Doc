@@ -5,92 +5,88 @@ permalink: /zh/guide/modules/database/
 createTime: 2026/03/30 23:42:30
 ---
 
-# Database — 自然语言查数据库
+# 数据库（NL2SQL）
 
-Database 模块使用 SQLite + SQLAlchemy，将自然语言转换为 SQL 查询。
+DB 能力让 Agent **只读**访问真实 SQL 数据库。内置两个方言——**SQLite** 和 **MySQL**；Postgres / DuckDB 只需一个文件即可接入。
 
-## 工作原理
+## 三层安全闸
 
-用户问题 → LLM 生成 SQL → SQLite 执行 → 结果返回
+哪怕模型出错生成了 `DELETE`，也会被拦掉：
 
-## 数据接入
+1. **语法首词检查** —— 首词在 `{INSERT, UPDATE, DELETE, REPLACE, DROP, CREATE, ALTER, TRUNCATE, RENAME, GRANT, REVOKE, ATTACH, DETACH, CALL, EXEC, BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, LOAD, COPY, KILL, LOCK, UNLOCK, PRAGMA}` 中的直接拒绝。
+2. **拒绝多语句** —— `SELECT 1; DELETE …` 被拒；字符串字面量会先被 mask，`SELECT ';' FROM t` 这种正常放行。
+3. **行数上限包装** —— 每条 SQL 都会被包成 `SELECT * FROM (<user-sql>) LIMIT <row_limit+1>`，到上限就把 `truncated=True` 标出来。
 
-系统**自动检测数据来源**，按以下优先级加载：
+每个方言还有额外的连接级保护：
 
-1. `data/profiles/{profile}/tables/*.sql` → 执行 SQL 文件建表 + 插入数据
-2. 无 SQL 文件 → fallback 到内置 demo 员工数据库
+- **SQLite**：每次连接开头 `PRAGMA query_only = ON`
+- **MySQL**：`SET SESSION TRANSACTION READ ONLY`（需权限；即使失败上面三层也守着）
 
-不需要修改任何代码，系统会自动识别表名并配置 Agent 工具描述。
+## 工具清单
 
-### 方式 A：SQL 文件导入（推荐）
+| 工具 | 作用 |
+|---|---|
+| `db_list_tables` | 列出所有表 + 视图 |
+| `db_describe_table` | 某表的列定义（名/类型/PK/nullability）+ 行数估计 |
+| `db_query_sql` | 执行一条只读 SELECT，限行数 + 限超时 + 安全闸检查 |
+| `db_query_nl` | Agent LLM 根据自然语言问题生成 SQL 后执行 |
 
-将 `.sql` 文件放入 `data/profiles/{profile}/tables/` 目录：
+## NL2SQL 流程
 
-```
-data/profiles/mydata/tables/
-├── 01_schema.sql     ← 建表语句（按文件名排序执行）
-└── 02_data.sql       ← 插入数据
-```
+1. `db_query_nl(question, tables=None)` 请求主 LLM 输出**一条**只读 SELECT，上下文是 schema。
+2. 生成的 SQL 会走和 `db_query_sql` 一样的三层安全闸。
+3. 返回中同时包含生成 SQL + 结果行，Agent（和你）都能审计。
 
-**01_schema.sql**（建表示例）：
+观察到的自动恢复：模型列错不存在的字段 → 安全闸报错 → Agent 读到 tool_result → 调 `db_describe_table` → 重写 SQL。
 
-```sql
-CREATE TABLE employees (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  department TEXT,
-  position TEXT,
-  salary REAL,
-  city TEXT
-);
+## 配置
 
-CREATE TABLE projects (
-  id INTEGER PRIMARY KEY,
-  project_name TEXT NOT NULL,
-  lead_employee_id INTEGER,
-  budget REAL,
-  status TEXT
-);
-```
+```bash
+DATAMIND__DB__DIALECT=sqlite                 # sqlite | mysql | …
+# SQLite（默认）：DSN 留空，会自动用 storage/<profile>/demo.db
+# DATAMIND__DB__DSN=
 
-**02_data.sql**（插入示例）：
+# MySQL
+# DATAMIND__DB__DIALECT=mysql
+# DATAMIND__DB__DSN=mysql+pymysql://user:pw@host:3306/dbname
+# 装 extra: pip install -e '.[mysql]'
 
-```sql
-INSERT INTO employees (id, name, department, position, salary, city) VALUES
-  (1, '张三', '研发', '工程师', 25000, '北京'),
-  (2, '李四', '市场', '经理', 30000, '上海');
+# Postgres（规划中）
+# DATAMIND__DB__DIALECT=postgres
+# DATAMIND__DB__DSN=postgresql+psycopg://user:pw@host:5432/db
 
-INSERT INTO projects (id, project_name, lead_employee_id, budget, status) VALUES
-  (1, '产品 A', 1, 500000, '进行中'),
-  (2, '产品 B', 2, 800000, '规划中');
+DATAMIND__DB__READ_ONLY=true
+DATAMIND__DB__ROW_LIMIT=1000
+DATAMIND__DB__QUERY_TIMEOUT_S=10.0
 ```
 
-SQL 文件按文件名排序依次执行，建议用数字前缀控制顺序。
+## 新增方言
 
-### 方式 B：直接提供 SQLite 文件
+```python
+# datamind/capabilities/db/providers/postgres.py
+from sqlalchemy import text
+from datamind.core.registry import db_registry
+from ..base import BaseSQLDialect
 
-放到 `storage/{profile}/demo.db`。
+@db_registry.register("postgres")
+class PostgresDialect(BaseSQLDialect):
+    name = "postgres"
+    def build_engine(self, dsn, **kw):
+        if not dsn or not dsn.startswith(("postgres", "postgresql")):
+            raise ConfigError("invalid postgres DSN")
+        return super().build_engine(dsn, **kw)
+    def _before_query(self, conn):
+        conn.execute(text("SET TRANSACTION READ ONLY"))
+    def _quote_ident(self, name):
+        return '"' + name.replace('"', '""') + '"'
+```
 
-### 数据类型建议
+在 `providers/__init__.py` 加一行 import 即可。
 
-| Python/CSV 类型 | SQLite 类型 | 说明 |
-|----------------|-------------|------|
-| int | INTEGER | 整数、ID、数量 |
-| float | REAL | 价格、分数、百分比 |
-| str | TEXT | 名称、描述、类别 |
-| date/datetime | TEXT | 建议存为 YYYY-MM-DD 格式 |
-| bool | INTEGER | 0 / 1 |
+## 验证
 
-## Demo 数据
+```bash
+python -m datamind.scripts.hello_db
+```
 
-内置 demo 数据库包含 **employees**（8 名员工）和 **projects**（4 个项目）表。
-
-## Web 界面
-
-点击 **Database** 面板 → 查看表结构 → 点击「查看数据」展示表内容。
-
-## 安全注意事项
-
-- NL2SQL 会执行 LLM 生成的 SQL，存在安全风险
-- 建议使用只读数据库连接
-- 不要连接包含敏感数据的生产数据库
+会建一个 employees + projects 小库，跑 SQL、跑 NL2SQL、验证 `DELETE` 被拒。

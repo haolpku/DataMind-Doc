@@ -5,92 +5,96 @@ permalink: /zh/guide/modules/graphrag/
 createTime: 2026/03/30 23:42:14
 ---
 
-# GraphRAG — 知识图谱检索
+# 知识图谱（Graph）
 
-GraphRAG 通过知识图谱中的实体和关系进行多跳推理，适合理解实体间的复杂关联。
+Graph 能力把 `(subject, relation, object)` 三元组存进 `GraphStore`，让 Agent 可遍历。
 
-## RAG vs GraphRAG
+默认后端：**NetworkX**，持久化为 `storage/<profile>/graph.json`。≤ 100k 边都够用；更大就在 `graph_registry` 里注册 Neo4j 之类的后端。
 
-| | RAG（向量检索） | GraphRAG（图谱检索） |
-|---|---|---|
-| 适合的问题 | "X 是什么？" | "A 和 B 有什么关系？" |
-| 检索方式 | 语义相似度匹配 | 实体关系遍历 |
-| 强项 | 单跳事实查找 | 多跳推理、关系理解 |
-| 数据存储 | 向量数据库 (Chroma) | 属性图 (NetworkX) |
+## 导入三元组
 
-## 数据入库
+两种方式：
 
-### 方式 A：自动抽取（默认）
+### A. profile JSONL
 
-与 RAG 共享同一个 profile 目录。LLM 自动从文档中抽取实体和关系。
+把文件放到 `data/profiles/<profile>/triplets/*.jsonl`，一行一个：
 
-**优化建议**：
+```jsonl
+{"subject": "Ann", "relation": "leads", "object": "Search platform"}
+{"subject": "Acme", "relation": "located_in", "object": "Shanghai", "confidence": 1.0}
+```
 
-- 确保文档中实体名称一致（统一用"张三"而非混用"小张"/"张经理"）
-- 每个段落围绕明确的实体和关系展开
-- 减少噪声文本（页眉页脚、目录、版权声明等）
+warmup 时会自动加载：
 
-### 方式 B：预构建三元组（JSONL）
+```python
+await agent.warmup()
+# -> 调用 graph.load_from_profile()
+```
 
-将 JSONL 文件放入 `data/profiles/{profile}/triplets/`：
+### B. `graph_upsert_triples` 工具
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `subject` | string | 是 | 主体实体 |
-| `relation` | string | 是 | 关系类型 |
-| `object` | string | 是 | 客体实体 |
-| `subject_type` | string | 否 | 主体类型（如 `"Person"`），默认 `"entity"` |
-| `object_type` | string | 否 | 客体类型（如 `"Organization"`），默认 `"entity"` |
-| `subject_properties` | object | 否 | 主体附加属性（多模态预留，如 `{"image": "img/a.png"}`） |
-| `object_properties` | object | 否 | 客体附加属性（多模态预留） |
-| `confidence` | float | 否 | 置信度（默认 1.0） |
-| `source` | string | 否 | 来源标识 |
-
-示例：
+用户让 Agent 记住新关系时用：
 
 ```json
-{"subject": "实体A", "relation": "就职于", "object": "实体B"}
-{"subject": "实体A", "relation": "就职于", "object": "实体B", "subject_type": "Person", "object_type": "Organization"}
+{
+  "triples": [
+    {"subject": "Ann", "relation": "manages", "object": "Bob"},
+    {"subject": "Bob", "relation": "works_on", "object": "Search platform"}
+  ]
+}
 ```
 
-## 自动检测优先级
+## 数据模型
 
-1. 已有图索引 → 直接加载
-2. `profiles/{profile}/triplets/*.jsonl` 存在 → 方式 B（直接导入，不经过 LLM）
-3. `profiles/{profile}/` 下有文档 → 方式 A（LLM 自动抽取）
+每个三元组产生：
 
-## 图谱可视化
+- `subject` / `object` 对应两个 **节点**（`label` 默认 = id，`type` 默认 `"entity"`）
+- relation 作为 **边** 的 key，携带 `weight = confidence` 和 properties
 
-构建完成后，图谱保存为交互式 HTML 文件：
+`type` 和 `relation` 都是自由字符串——定一套规范并坚持用。
 
-```
-storage/{profile}/graph/knowledge_graph.html
-```
+## 工具清单
 
-用浏览器打开即可查看实体和关系。
+| 工具 | 作用 |
+|---|---|
+| `graph_search_entities` | 按名字精确 + 模糊匹配节点 |
+| `graph_traverse` | 从 start BFS 到 `max_hops`，可传 `relation_filter` 限制走哪些边。返回按平均权重排序的路径 |
+| `graph_neighbors` | 某个节点的所有入/出边（`direction` = both/out/in） |
+| `graph_upsert_triples` | 写入新三元组（标注为 destructive） |
 
-## 调整抽取参数
+## 端到端示例
 
-系统读取 profile 目录下的文档时，默认使用 `SimpleLLMPathExtractor` 自动抽取实体和关系。
-
-```python
-kg_extractor = SimpleLLMPathExtractor(max_paths_per_chunk=10)
-```
-
-如需更精确的抽取（预定义实体和关系类型）：
-
-```python
-from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
-
-kg_extractor = SchemaLLMPathExtractor(
-    possible_entities=["人物", "公司", "产品", "技术", "地点"],
-    possible_relations=["开发了", "属于", "使用", "位于", "合作"],
-)
+```bash
+python -m datamind.scripts.hello_graph
 ```
 
-## Web 界面
+种的三元组：
 
-点击 **GraphRAG** 面板可以：
+```
+Ann      —leads→         Search platform
+Bob      —member_of→     Search platform
+Search   — part_of→      Acme Engineering
+Acme     —located_in→    Shanghai
+Shanghai —in_country→    China
+```
 
-- 查看所有实体和关系
-- 重建知识图谱
+`Ann` 出发的 3-hop 遍历返回：
+
+```
+Ann → Acme → Shanghai         [works_at | located_in]
+Ann → Project Alpha           [leads]
+Ann → Acme → Shanghai → China [works_at | located_in | in_country]
+…
+```
+
+加上 `relation_filter=["works_at", "located_in", "in_country"]` 会只保留业务链。
+
+## 配置
+
+```bash
+DATAMIND__GRAPH__BACKEND=networkx      # networkx | neo4j (future)
+# DATAMIND__GRAPH__DSN=bolt://user:pw@host:7687
+DATAMIND__GRAPH__EMBED_ENTITIES=false
+```
+
+接 Neo4j 就在 `datamind/capabilities/graph/providers/neo4j_store.py` 下新建一个类 + `@graph_registry.register("neo4j")`。`build_graph_service` 已经为 DSN-based 后端做好了路由。

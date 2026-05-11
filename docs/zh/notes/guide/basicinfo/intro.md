@@ -7,39 +7,44 @@ createTime: 2026/03/23 00:55:54
 
 # 简介
 
-**DataMind** 是一个基于 [LlamaIndex](https://www.llamaindex.ai/) 构建的一体化智能助手，集成五大核心模块：
+**DataMind** 是一个统一的检索型 Agent，把五种知识能力接到同一个 Claude 智能助手里：
 
-| 模块 | 功能 | 后端 |
-|------|------|------|
-| **RAG** | 向量语义检索，支持多模态（CLIP / VLM 文本化） | Chroma |
-| **GraphRAG** | 知识图谱检索 | NetworkX |
-| **Database** | 自然语言转 SQL | SQLite |
-| **Skills** | 可扩展工具系统 | FunctionTool |
-| **Memory** | 对话记忆 | 短期 + 长期 |
+| 能力 | 作用 | 默认后端 |
+|---|---|---|
+| **KB（RAG）** | 基于语义 + 词法的文档检索 | Chroma + BM25（RRF 融合） |
+| **Graph** | 实体查找与多跳图谱遍历 | NetworkX（JSON 持久化） |
+| **Database** | 自然语言 → SQL 查询 | SQLAlchemy（SQLite / MySQL / …） |
+| **Skills** | Markdown 运维手册 + 安全代码技能（计算器、单位换算等） | `.claude/skills/<name>/SKILL.md` |
+| **Memory** | 短期对话缓冲 + 长期语义记忆 | SQLite + 向量召回 |
 
-**Agent** 会根据用户问题**自动选择**最合适的工具，无需手动指定。
+**Agent 主循环** 自行选择工具、能从工具错误中恢复、全程流式输出。你**不用**硬编码哪类问题走哪个能力。
 
-## 为什么叫 DataMind？
+## v0.2 相对 v0.1 的变化
 
-名字精确地捕捉了系统的本质：**Data** 是静态的原材料，**Mind** 通过理解、推理、记忆和决策让数据活了起来。
+v0.1 是一个 LlamaIndex `FunctionAgent`，所有能力都硬绑在全局 `AppState` 里。v0.2 保留这五个能力，但：
 
-每个模块映射了一种认知能力：
+- 每个能力背后是一个 `Protocol`（接口）+ `Registry`（注册表）——新增一个 DB 方言 / Embedding 提供商 / 检索策略都是**单文件改动**，核心零改动。
+- Agent 主循环自己写（对接任意 Anthropic 兼容 `/v1/messages` 网关），**不依赖** `claude` CLI（避免部分环境中被第三方二进制劫持）。
+- 流式是**真正的 SSE**（SDK 流 → FastAPI SSE），不是旧版的"字符切片伪流式"。
+- 零全局状态；每个请求有自己的 `RequestContext`。
+- **旧版未删除**——旧 `main.py` / `server.py` / `modules/` 仍可运行，可以随时对照两种实现。
 
-- **RAG** → 感知（将原始文本编码为向量表示）
-- **GraphRAG** → 联想（通过实体关系网络连接概念）
-- **Database** → 语言（在自然语言和形式查询语言之间架桥）
-- **Memory** → 记忆（工作记忆 + 长期记忆，自动摘要）
-- **Skills** → 技能（可调用的程序性知识）
-- **Agent** → 执行控制（自主决策使用哪个能力）
+## 新目录速查
 
-## 两种使用方式
+```
+datamind/
+├── agent/              # agent loop + 系统提示 + 能力装配
+├── capabilities/
+│   ├── embedding/      # OpenAI 兼容 + HuggingFace
+│   ├── kb/             # Chroma + simple/multi_query/hybrid 三个检索器
+│   ├── graph/          # NetworkX graph store
+│   ├── db/             # SQLAlchemy + SQLite/MySQL 方言 + NL2SQL
+│   ├── memory/         # 短期滚动 + SQLite 长期记忆
+│   └── skills/         # SKILL.md 加载器 + code skills
+├── core/               # Protocol / Registry / Config / Logging / Tool 框架
+├── scripts/            # 每个能力一个 hello_*.py 真实冒烟脚本
+├── cli.py              # `python -m datamind ...`
+└── server.py           # FastAPI + 真流式 SSE
+```
 
-- **Web 界面** — 全功能界面，流式对话输出，RAG/GraphRAG/Database/Skills/Memory 可视化管理面板
-- **终端命令行** — 交互式对话模式，功能完全一致，适合无图形界面的服务器
-
-## 设计目标
-
-1. **模块化可扩展** — 各模块独立，新增检索策略或工具无需改动其他模块
-2. **Benchmark 就绪** — 内置并发推理测评，支持准确率评估
-3. **以数据为中心** — 基于 Profile 的数据管理，方便对比不同预处理方案
-4. **零 GPU 依赖** — 所有 LLM 推理和 Embedding 通过远程 API 完成
+每个能力都配了一个 `hello_<cap>.py`，会连真实网关跑端到端测试。详见[快速开始](./install.md)。

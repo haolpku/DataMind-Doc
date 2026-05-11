@@ -5,108 +5,191 @@ permalink: /zh/guide/basicinfo/architecture/
 createTime: 2026/03/30 23:41:34
 ---
 
-# 架构设计
+# 架构
 
-## 项目结构
-
-```
-DataMind/
-├── config.py              # 配置中心 (Pydantic Settings, 从 .env 读取)
-├── .env.example           # 环境变量模板
-├── server.py              # Web 入口: FastAPI 后端 + 前端页面
-├── main.py                # 终端入口: 交互式命令行
-├── benchmark/             # 并发推理测评
-│   ├── run.py             #   测评运行器 (并发推理 + 指标统计)
-│   └── evaluate.py        #   答案评估 (EM / F1)
-├── core/                  # 核心层
-│   ├── bootstrap.py       #   共享初始化逻辑 (AppState)
-│   └── session.py         #   Session 隔离 (SessionManager)
-├── modules/               # 各功能模块
-│   ├── rag/               #   RAG 向量检索
-│   │   ├── indexer.py     #     文档加载 + Chroma 向量索引
-│   │   └── retriever.py   #     检索策略 (Simple / MultiQuery)
-│   ├── graphrag/          #   GraphRAG 知识图谱
-│   │   └── graph_rag.py   #     图谱构建 + 查询
-│   ├── database/          #   Database NL2SQL
-│   │   └── database.py    #     SQLite 示例 + NL2SQL 引擎
-│   ├── skills/            #   技能系统
-│   │   ├── tools.py       #     工具型: 计算器/时间/换算等
-│   │   └── knowledge.py   #     知识型: Markdown 文档检索
-│   ├── memory/            #   对话记忆
-│   │   └── memory.py      #     短期 + 长期记忆管理
-│   └── agent/             #   Agent 智能调度
-│       └── agent.py       #     整合所有工具的 FunctionAgent
-├── data/                  # 数据目录
-│   ├── profiles/          #   知识库 (按 DATA_PROFILE 隔离)
-│   ├── bench/             #   Benchmark 问题集
-│   └── skills/            #   技能文档 (跨 profile 共享)
-└── storage/               # 自动生成: 索引持久化
-```
-
-## 初始化流程
-
-`core/bootstrap.py` 定义了 `AppState` 数据类和 `initialize()` 函数：
+## 一张图
 
 ```
-initialize()
-  │
-  ├── 配置 LlamaSettings (LLM + Embedding)
-  ├── 构建/加载 RAG 索引 (Chroma)
-  ├── 构建/加载 GraphRAG 索引 (NetworkX)
-  ├── 初始化 Database (SQLite + NL2SQL 引擎)
-  ├── 构建/加载 Skills 索引 (Chroma)
-  └── 创建 FunctionAgent (挂载所有工具)
-        │
-        └── AppState (持有所有组件)
+┌──────────────────────────────────────────────────────────────────────┐
+│                        User (CLI · HTTP · SSE)                       │
+└───────────────┬──────────────────────────────────────────────────────┘
+                │
+          ┌─────▼────────────────────────────────────┐
+          │          datamind.agent.AgentLoop        │
+          │   system_prompt + tool schemas + 回合循环 │
+          └─────┬────────────────────────────────────┘
+                │  /v1/messages (流式, tool_use/result)
+          ┌─────▼────────────────────────────────────┐
+          │  Anthropic 兼容网关 (Claude)               │
+          └─────┬────────────────────────────────────┘
+                │
+  ┌─────────────┼─────────────┬───────────────┬───────────────┬────────────────┐
+┌─▼─────┐  ┌────▼────┐  ┌─────▼─────┐   ┌─────▼─────┐   ┌─────▼─────┐   ┌──────▼──────┐
+│  KB   │  │   DB    │  │   Graph   │   │  Skills   │   │  Memory   │   │  代码技能    │
+│Chroma │  │SQLAlch. │  │ NetworkX  │   │ SKILL.md  │   │  SQLite   │   │  (calc, …)   │
+│ +BM25 │  │SQLite / │  │ (JSON)    │   │ + Chroma  │   │ + 向量    │   │              │
+│ +RRF  │  │ MySQL / │  │           │   │           │   │           │   │              │
+└───────┘  └─────────┘  └───────────┘   └───────────┘   └───────────┘   └──────────────┘
+    │           │              │               │               │
+    └──────── EmbeddingProvider (OpenAI 兼容 / HuggingFace) ────┘
 ```
 
-`server.py`（Web）和 `main.py`（CLI）在启动时各调用一次 `initialize()`。
+每个框都是一个 **Protocol（接口）**。每个具体类在一个 **Registry（注册表）** 里按字符串名字注册。Agent 只认接口，从不 import 具体类。
 
-## Agent 决策流程
+## 核心层 — `datamind.core`
 
-```
-用户问题
-    │
-    ▼
-FunctionAgent 接收问题 + 所有工具描述
-    │
-    ▼
-LLM 决定调用哪个工具
-    │
-    ├── knowledge_search  → RAG 向量检索
-    ├── graph_search      → GraphRAG 实体/关系遍历
-    ├── database_query    → NL2SQL → 执行 SQL
-    ├── skill_search      → 知识技能检索
-    ├── calculator / ...  → 工具技能执行
-    └── (无)              → 直接 LLM 回答
-    │
-    ▼
-整合工具结果 → 生成最终回答
-```
+### Protocols（`protocols.py`）
 
-## Session 隔离
+六个最小接口，定义一个能力**是什么**，而不是怎么做：
 
-`core/session.py` 提供 `SessionManager`，实现按用户隔离记忆：
+| Protocol | 职责 |
+|---|---|
+| `EmbeddingProvider` | `embed_texts([...])`, `embed_query(q)` |
+| `VectorStore` | `add / query / count / delete / reset / get_all_texts` |
+| `Retriever` | `aretrieve(query, top_k, filters)` |
+| `GraphStore` | `upsert_triples / search_entities / traverse / neighbors` |
+| `DatabaseDialect` | `build_engine / list_tables / describe / execute_readonly / is_destructive` |
+| `MemoryStore` | `save / recall / forget / list_namespaces` |
+
+### Registries（`registry.py`）
+
+每个可扩展维度一个注册表：
 
 ```python
-from core.session import SessionManager
+@embedding_registry.register("voyage")
+class VoyageEmbedding: ...
 
-session_mgr = SessionManager()
-memory_a = session_mgr.get_memory("user_a")
-memory_b = session_mgr.get_memory("user_b")
+# 用的时候：
+emb = embedding_registry.create("voyage", api_key=..., model=...)
 ```
 
-这对并发 Benchmark 测试和多用户 Web 服务至关重要。
+未知名字抛 `ConfigError`，顺带列出所有已注册选项——输入错别字立即暴露。
 
-## 技术栈
+### Tool 框架（`tools.py`）
 
-| 组件 | 技术 | 说明 |
-|------|------|------|
-| 框架 | LlamaIndex | 核心编排 |
-| LLM | OpenAI 兼容 API | 不需要 GPU |
-| 向量数据库 | Chroma | 本地, 纯 Python |
-| 知识图谱 | NetworkX | 本地, 纯 Python |
-| 关系数据库 | SQLite | 零配置 |
-| Agent | FunctionAgent | 自动工具选择 |
-| Web 后端 | FastAPI | 异步, SSE 流式输出 |
-| Web 前端 | 纯 HTML/CSS/JS | 无需 npm, 零前端依赖 |
+`ToolSpec(name, description, input_schema, handler)` 就是 agent 需要的全部。`ToolRegistry.as_anthropic_tools()` 输出的就是 `/v1/messages` 的 `tools=[...]` JSON。
+
+`metadata={"group": "kb"}` 只被系统提示的组装逻辑用来给模型描述工具清单。
+
+### Context（`context.py`）
+
+`RequestContext(session_id, profile, user_id, trace_id, extra)` —— 每个请求一个。替代 v0.1 的全局 `AppState`。日志层通过 `contextvars` 自动把 `trace_id` 打到每条 JSON 记录里。
+
+### Errors（`errors.py`）
+
+四层：`DataMindError` → `ConfigError` / `CapabilityError(capability, cause)` / `ExternalServiceError(service, status_code, cause)`。
+
+### Logging（`logging.py`）
+
+stderr 输出一行一条 JSON。绑定了 `RequestContext` 之后每条记录自动带 `trace_id / session_id / profile`。零重型依赖（只用了 stdlib `logging`）。
+
+## 能力层 — `datamind.capabilities`
+
+每个子包都遵循相同模式：
+
+```
+capabilities/<cap>/
+├── __init__.py           # 重新导出 service + tool 工厂
+├── service.py            # build_<cap>_service(settings) -> <cap>Service
+├── tools.py              # build_<cap>_tools(service) -> list[ToolSpec]
+└── providers/
+    ├── __init__.py       # import 每个 provider 模块
+    └── <backend>.py      # @<cap>_registry.register("name") class …
+```
+
+- **service** 是有状态的胶水——持有 Chroma client / SQLAlchemy engine / NetworkX graph，对外暴露清晰的 async 方法。
+- **tools** 把方法包成带 JSON schema 的 `ToolSpec`。
+- **providers** 是后端实现，新增 Postgres 就是在 `db/providers/postgres.py` 下加一个新文件 + 一个装饰器；其他文件不动。
+
+## Agent 层 — `datamind.agent`
+
+| 文件 | 作用 |
+|---|---|
+| `loop.py` | tool-use 回合循环（`run_turn` + `stream_turn`） |
+| `options.py` | `build_agent(settings)` —— 把全部能力装配成一个 `DataMindAgent` |
+| `prompts.py` | 按分组生成系统提示 |
+
+### 单回合循环
+
+```
+    ┌─ user_message ─┐
+    │                │
+    ▼                │
+┌────────────────────▼─────────────────────────────────┐
+│ messages.create(system, tools, messages)              │
+└────────────────┬──────────────────────────────────────┘
+                 │
+        ┌────────▼────────────┐
+        │ stop_reason?        │
+        └────────┬────────────┘
+                 │
+       ┌─────────┴─────────┐
+       │                   │
+    tool_use           end_turn
+       │                   │
+       ▼                   └──► 返回最终文本
+┌──────────────────┐
+│ for each tool:   │
+│   on_tool_start  │
+│   spec.handler() │
+│   on_tool_end    │
+│   append result  │
+└───────┬──────────┘
+        │
+        └──► 继续循环（max_tool_turns 上限）
+```
+
+Hooks（`on_tool_start`、`on_tool_end`）是下一期审计日志 / 权限检查的接入点。
+
+## 配置层 — `datamind.config`
+
+嵌套 `pydantic-settings`，每一块都是一个 `BaseModel`：
+
+```
+Settings
+├── llm          # api_base / api_key / model / fallback_model / timeout_s
+├── embedding    # provider / api_base / api_key / model / batch_size
+├── retrieval    # strategy / top_k / chunk_size / chunk_overlap / rerank
+├── graph        # backend / dsn / embed_entities
+├── db           # dialect / dsn / read_only / row_limit / query_timeout_s
+├── memory       # backend / dsn / short_term_turns / long_term_enabled
+├── data         # profile / base_dir  (自动派生 data_dir / storage_dir)
+└── logging      # level
+```
+
+环境变量用双下划线嵌套：`DATAMIND__DB__DSN=mysql+pymysql://...`。切换 profile：
+
+```bash
+DATAMIND__DATA__PROFILE=customer_a python -m datamind chat
+```
+
+`data/profiles/customer_a/` 和 `storage/customer_a/` **一起切换**。
+
+## v0.1 → v0.2 替换对照表
+
+| v0.1 | v0.2 | 备注 |
+|---|---|---|
+| `core/bootstrap.py` 全局 `AppState` | `agent.options.build_agent()` | 无状态，可组合 |
+| `modules/rag/retriever.py` | `capabilities/kb/providers/{simple,multi_query,hybrid}_retriever.py` | 三种策略，注册表化 |
+| `modules/rag/indexer.py` | `capabilities/kb/indexer.py` | 功能相同，错误处理改进 |
+| `modules/database/database.py` | `capabilities/db/{service,providers}.py` | SQLite + MySQL；安全闸 |
+| `modules/graphrag/graph_rag.py` | `capabilities/graph/providers/networkx_store.py` | 持久化用 JSON（不是 pickle） |
+| `modules/memory/memory.py` | `capabilities/memory/{short_term,service,providers/sqlite_store}.py` | 三层 + 事实抽取 |
+| `modules/skills/*` | `capabilities/skills/{loader,service,code_skills}.py` + `.claude/skills/*/SKILL.md` | SDK 风格 manifest |
+| `server.py` / `main.py` | `datamind/server.py` + `datamind/cli.py` | 真 SSE，无全局变量，typer CLI |
+
+**旧文件都还在，照样能跑。** 可以随时对照。
+
+## 技术栈一览
+
+| 组件 | 技术 | 备注 |
+|---|---|---|
+| Agent 运行时 | `anthropic` SDK + 自写循环 | 不依赖 claude CLI |
+| LLM | Anthropic 兼容 `/v1/messages` | 流式 + tool_use |
+| Embedding | OpenAI 兼容 `/v1/embeddings` 或 HF 本地 | `openai_compatible` provider |
+| 向量库 | Chroma | `@vector_store_registry.register("chroma")` |
+| Graph | NetworkX + JSON 持久化 | Neo4j 将作为 provider 插入 |
+| RDBMS | SQLAlchemy 2.0 | SQLite + MySQL 内置 |
+| Memory | SQLite + 向量 cosine 召回 | Redis / Postgres 可作为 provider |
+| Server | FastAPI + 真 SSE | `python -m uvicorn datamind.server:app` |
+| CLI | `typer` + `rich` | `python -m datamind ...` |

@@ -7,92 +7,108 @@ createTime: 2026/03/30 23:43:41
 
 # 配置说明
 
-所有配置通过 `.env` 文件管理（也支持环境变量覆盖）。
+DataMind v0.2 使用嵌套 [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)，前缀 `DATAMIND__`，分层用双下划线：
 
 ```bash
-cp .env.example .env
+DATAMIND__<section>__<field>=value
 ```
 
-## 完整参数
+配置从仓库根目录的 `.env` 和 `.env.datamind` 读取，再被进程环境变量覆盖。
+
+## 快速参考
 
 ```bash
-# ── LLM ──
-LLM_API_BASE=https://api.deepseek.com/v1
-LLM_API_KEY=sk-xxx
-LLM_MODEL=deepseek-chat
+# ── LLM ─────────────────────────────────────────────────────────
+DATAMIND__LLM__API_BASE=http://35.220.164.252:3888
+DATAMIND__LLM__API_KEY=sk-...
+DATAMIND__LLM__MODEL=claude-sonnet-4-6
+DATAMIND__LLM__FALLBACK_MODEL=claude-haiku-4-5-20251001
+DATAMIND__LLM__MAX_TOKENS=4096
+DATAMIND__LLM__TEMPERATURE=1.0
+DATAMIND__LLM__TIMEOUT_S=60.0
 
-# ── Embedding ──
-USE_LOCAL_EMBEDDING=false
-EMBEDDING_API_BASE=https://api.deepseek.com/v1
-EMBEDDING_API_KEY=sk-xxx
-EMBEDDING_MODEL=text-embedding-3-small
-LOCAL_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5    # CPU 可跑, ~100MB
+# ── Embedding ───────────────────────────────────────────────────
+DATAMIND__EMBEDDING__PROVIDER=openai             # openai | openai_compatible | huggingface
+# 留空 = 复用 LLM__ 的 gateway 凭证
+DATAMIND__EMBEDDING__API_BASE=
+DATAMIND__EMBEDDING__API_KEY=
+DATAMIND__EMBEDDING__MODEL=text-embedding-3-small
+DATAMIND__EMBEDDING__BATCH_SIZE=32
+# DATAMIND__EMBEDDING__DIMENSION=1536          # 不填则自动探测
 
-# ── 检索器 ──
-RETRIEVER_MODE=simple          # simple / multi_query
-SIMILARITY_TOP_K=3
-MULTI_QUERY_COUNT=3
+# ── Retrieval ───────────────────────────────────────────────────
+DATAMIND__RETRIEVAL__STRATEGY=hybrid             # simple | multi_query | hybrid
+DATAMIND__RETRIEVAL__TOP_K=5
+DATAMIND__RETRIEVAL__CHUNK_SIZE=512
+DATAMIND__RETRIEVAL__CHUNK_OVERLAP=64
+DATAMIND__RETRIEVAL__RERANK=false
 
-# ── 多模态 ──
-IMAGE_EMBEDDING_MODE=disabled  # disabled / clip / vlm_describe
-CLIP_MODEL=openai/clip-vit-base-patch32
-VLM_MODEL=                     # 为空时复用 LLM_MODEL
-USE_MULTIMODAL_LLM=false       # 回答时是否传图给多模态 LLM
-IMAGE_SIMILARITY_TOP_K=2
+# ── Graph ───────────────────────────────────────────────────────
+DATAMIND__GRAPH__BACKEND=networkx                # networkx | neo4j (future)
+# DATAMIND__GRAPH__DSN=bolt://user:pw@host:7687
+DATAMIND__GRAPH__EMBED_ENTITIES=false
 
-# ── 记忆 ──
-MEMORY_TOKEN_LIMIT=30000
-CHAT_HISTORY_TOKEN_RATIO=0.7
+# ── Database ────────────────────────────────────────────────────
+DATAMIND__DB__DIALECT=sqlite                     # sqlite | mysql | postgres (future)
+# DATAMIND__DB__DSN=mysql+pymysql://user:pw@host:3306/dbname
+DATAMIND__DB__READ_ONLY=true
+DATAMIND__DB__ROW_LIMIT=1000
+DATAMIND__DB__QUERY_TIMEOUT_S=10.0
 
-# ── Data Profile ──
-DATA_PROFILE=default           # 切换知识库 profile
+# ── Memory ──────────────────────────────────────────────────────
+DATAMIND__MEMORY__BACKEND=sqlite                 # sqlite | redis (future) | postgres (future)
+# DATAMIND__MEMORY__DSN=
+DATAMIND__MEMORY__SHORT_TERM_TURNS=20
+DATAMIND__MEMORY__LONG_TERM_ENABLED=true
+
+# ── Data / profile ──────────────────────────────────────────────
+DATAMIND__DATA__PROFILE=default                  # data/profiles/<>/ 和 storage/<>/ 一起切换
+
+# ── 日志 ────────────────────────────────────────────────────────
+DATAMIND__LOGGING__LEVEL=INFO
 ```
 
-## Data Profile
+## Profile 切换
 
-通过 `DATA_PROFILE` 切换不同的知识库。每个 profile 的数据和索引完全隔离：
+一条环境变量搞定：
 
 ```bash
-DATA_PROFILE=default python main.py     # 默认 profile
-DATA_PROFILE=2wiki python main.py       # 切换到 2wiki 数据集
+DATAMIND__DATA__PROFILE=customer_a python -m datamind chat
 ```
 
-对应的目录：
+会同时切换：
 
-- 数据：`data/profiles/{DATA_PROFILE}/`
-- 索引：`storage/{DATA_PROFILE}/`
+- `data/profiles/customer_a/` —— 文档、三元组、SQL 种子
+- `storage/customer_a/` —— Chroma 集合、SQLite、memory、graph
 
-## 多模态配置
+其他 flag 都不用改。
 
-| 配置项 | 说明 |
-|--------|------|
-| `IMAGE_EMBEDDING_MODE` | `disabled`（默认）/ `clip` / `vlm_describe` |
-| `CLIP_MODEL` | CLIP 模型名（clip 模式使用） |
-| `VLM_MODEL` | VLM 模型（vlm_describe 模式，为空时复用 LLM_MODEL） |
-| `USE_MULTIMODAL_LLM` | 回答时是否把检索到的图片传给多模态 LLM |
-| `IMAGE_SIMILARITY_TOP_K` | 图片检索返回数量（clip 模式） |
+## 兼容的提供商
 
-`clip` 模式需要安装 `llama-index-embeddings-clip`，`vlm_describe` 模式需要安装 `llama-index-multi-modal-llms-openai`。
+### LLM（Anthropic 兼容 `/v1/messages`）
 
-## 工作原理
+- Anthropic 直连（`https://api.anthropic.com`）
+- AWS Bedrock / Vertex / Azure Foundry（有需要就自建代理）
+- 第三方代理 — 例如 `http://35.220.164.252:3888`，它还同时提供 OpenAI 风格的 `/v1/embeddings`（1536 维）
 
-DataMind 使用 Pydantic Settings 加载配置：
+### Embedding（OpenAI 兼容 `/v1/embeddings`）
 
-1. 读取 `.env` 文件
-2. 环境变量会覆盖 `.env` 中的值
-3. 未设置的变量使用内置默认值
+- OpenAI（`text-embedding-3-small`、`3-large`）
+- 硅基流动 / DeepSeek / 智谱 / Moonshot
+- 上述网关（同端点路径）
 
-临时覆盖：
+### DB 方言
 
-```bash
-LLM_MODEL=gpt-4o RETRIEVER_MODE=multi_query python main.py
-```
+- 内置：`sqlite`、`mysql`（需 pymysql）
+- 可插拔：任何 SQLAlchemy 支持的后端，写一个继承 `BaseSQLDialect` 的类 + `@db_registry.register(...)`
 
-## 路径
+## 启动时校验
 
-| 属性 | 默认值 | 说明 |
-|------|--------|------|
-| `data_dir` | `data/profiles/{DATA_PROFILE}/` | Profile 级数据目录 |
-| `storage_dir` | `storage/{DATA_PROFILE}/` | 索引持久化目录 |
-| `skills_dir` | `data/skills/` | 技能文档（跨 profile 共享） |
-| `bench_dir` | `data/bench/` | 问题集（跨 profile 共享） |
+Pydantic 在 Agent 启动前就校验每个字段：
+
+- `chunk_overlap < chunk_size`
+- `LLMConfig.api_key` 必填
+- MySQL DSN 必须以 `mysql+` 或 `mysql://` 开头
+- 所有数值 / 枚举类型必须匹配
+
+配置非法时直接快速失败，不会带着半坏状态运行。

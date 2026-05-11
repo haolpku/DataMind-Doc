@@ -8,8 +8,8 @@ config:
     background: tint-plate
     hero:
       name: DataMind
-      tagline: 一体化智能助手
-      text: 数据是静态的，Mind 让它活了。
+      tagline: 统一检索型 Agent（v0.2）
+      text: "KB · Graph · DB · Skills · Memory —— 一个 Agent 打通所有数据源"
       actions:
         -
           theme: brand
@@ -27,27 +27,27 @@ config:
     type: features
     features:
       -
-        title: RAG 向量检索
+        title: KB（混合检索）
         icon: carbon:search-locate
-        details: 基于 Chroma 的语义向量检索，支持原始文档和预分块 JSONL 两种输入方式。
+        details: Chroma + BM25 用 RRF 融合，三种可插拔策略（simple / multi_query / hybrid），多 profile 隔离
       -
-        title: GraphRAG 图谱检索
+        title: Graph 图谱
         icon: carbon:chart-relationship
-        details: 基于 NetworkX 的知识图谱检索，支持实体关系多跳推理。
+        details: NetworkX + JSON 持久化，支持多跳遍历和关系过滤；Neo4j 可直接作为 provider 插入
       -
-        title: Database 数据库查询
+        title: Database（NL2SQL）
         icon: carbon:data-table
-        details: 自然语言转 SQL，用日常语言查询结构化数据。
+        details: 内置 SQLite / MySQL（Postgres 一个文件即可接入），三层安全闸保障只读
       -
-        title: Skills 技能扩展
+        title: Skills
         icon: carbon:tools
-        details: 灵活的工具系统，任何 Python 函数都可以变成 Agent 的技能。
+        details: SDK 风格 .claude/skills/<name>/SKILL.md 知识型 skill + 代码型 skill（计算器、单位换算等）
       -
-        title: Memory 对话记忆
+        title: Memory
         icon: carbon:ai-status-in-progress
-        details: 短期 + 长期对话记忆，自动摘要，支持多 Session 隔离。
+        details: 短期滚动窗口 + SQLite 长期语义记忆 + 每轮 LLM 事实抽取
       -
-        title: Benchmark 性能测评
-        icon: carbon:meter-alt
-        details: 并发推理测评，支持 EM / F1 指标对比生成答案与标准答案。
+        title: Agent 与 Server
+        icon: carbon:machine-learning-model
+        details: 自写 tool-use 循环，对接任意 Anthropic 兼容网关；FastAPI 真 SSE 流式输出；不依赖 claude CLI
 ---

@@ -5,72 +5,105 @@ permalink: /zh/guide/modules/skills/
 createTime: 2026/03/30 23:42:41
 ---
 
-# Skills — 可扩展工具系统
+# Skills
 
-Skills 是最灵活的扩展方式——任何 Python 函数都可以变成 Agent 的工具。
+Skills 能力有两面：
 
-## 内置技能
+1. **知识型 skill** —— 可语义检索的 Markdown 运维手册 / SOP。
+2. **代码型 skill** —— 安全的 Python 工具（计算器、单位换算、当前时间、文本分析），Agent 直接调用。
 
-| 技能 | 函数名 | 说明 |
-|------|--------|------|
-| 当前时间 | `get_current_time` | 获取日期和时间 |
-| 计算器 | `calculator` | 精确数学计算 |
-| 文本分析 | `analyze_text` | 统计字数、行数、段落数 |
-| 单位换算 | `unit_convert` | 长度、重量、温度换算 |
+两者都注册到同一个 `ToolRegistry`。
 
-## 添加新技能
+## 知识型 skill —— `.claude/skills/<name>/SKILL.md`
 
-### 第 1 步：写一个 Python 函数
+格式遵循 Agent SDK 约定：YAML frontmatter + Markdown 正文。
 
-编辑 `modules/skills/tools.py`：
+```markdown
+---
+name: code-review
+description: 代码审查流程、审查要点、反馈规范。用户询问 code review / PR 审查 / 代码质量时使用。
+keywords: [code review, 代码审查, PR, pull request, review]
+---
+
+# 代码审查指南
+
+## 适用场景
+…
+```
+
+启动时 `SkillsService.load()` 做三件事：
+- 扫描 `.claude/skills/<dir>/SKILL.md`
+- 解析 frontmatter（手写解析器，不用装 PyYAML）
+- 把 `description + 正文` 写入独立 Chroma collection（`skills`），这样 `skill_search` 就能按语义找出最合适的 skill
+
+## 代码型 skill
+
+位置：`datamind/capabilities/skills/code_skills.py`
+
+| 工具 | 作用 |
+|---|---|
+| `calculator` | 在安全的数学命名空间内 `eval`：`sqrt sin cos tan log exp pow abs floor ceil pi e min max round sum`。拒绝 `__` / `import` / `exec` 等 |
+| `unit_convert` | 长度 / 质量 / 温度查表换算 |
+| `get_current_time` | 本地日期 + 星期 |
+| `analyze_text` | 字 / 行 / 段落 / 词数统计 |
+
+新增一个就三行：
 
 ```python
-def my_new_skill(param1: str, param2: int = 10) -> str:
-    """这里写工具描述 - Agent 靠这段文字判断何时调用此工具。
-    param1: 参数1的说明
-    param2: 参数2的说明，默认值为10
-    """
-    result = do_something(param1, param2)
-    return f"结果: {result}"
+async def _uuid4() -> dict:
+    import uuid
+    return {"uuid": str(uuid.uuid4())}
+
+SPECS.append(ToolSpec(
+    name="uuid4",
+    description="Generate a random UUID v4.",
+    input_schema={"type": "object", "properties": {}},
+    handler=_uuid4,
+    metadata={"group": "skill.code"},
+))
 ```
 
-关键要求：
-- 函数的 **docstring 是最重要的** — Agent 完全靠它决定何时调用这个工具
-- 参数需要有**类型标注**（`str`, `int`, `float` 等）
-- 返回值是 `str`
-- docstring 中说清楚**什么场景该用**、**参数含义**
+## 工具清单
 
-### 第 2 步：注册到 `get_all_skills()`
+| 工具 | 作用 |
+|---|---|
+| `skill_search` | 在所有知识型 skill 里做语义检索 |
+| `skill_get` | 按名字取某个 skill 的完整正文 |
+| `skill_list` | 列出所有已注册的知识型 skill |
+| `calculator`、`unit_convert`、`get_current_time`、`analyze_text` | 代码型 skill |
 
-```python
-def get_all_skills() -> list:
-    return [
-        FunctionTool.from_defaults(fn=get_current_time),
-        FunctionTool.from_defaults(fn=calculator),
-        FunctionTool.from_defaults(fn=analyze_text),
-        FunctionTool.from_defaults(fn=unit_convert),
-        FunctionTool.from_defaults(fn=my_new_skill),   # ← 加这一行
-    ]
+## 例子
+
+```bash
+python -m datamind.scripts.hello_skills
 ```
 
-不需要改其他文件，重启即可生效。
-
-## 知识型技能
-
-除了工具函数，DataMind 还支持**知识型技能** — 放在 `data/skills/` 下的 Markdown 文档会被索引并可检索：
-
 ```
-data/skills/
-├── 数据库运维SOP.md
-└── 代码审查指南.md
+skill_search 'how should I review a pull request?'
+  score=0.513  name=code-review
+  score=0.194  name=db-ops-sop
+
+skill_search '慢查询怎么排查'
+  score=0.392  name=db-ops-sop
+  score=0.330  name=code-review
 ```
 
-Agent 通过 `skill_search` 工具从这些文档中查找相关的流程和最佳实践。
+新增一个 skill 就是**一个文件**（零代码改动）：
 
-## Agent 如何决策
+```bash
+mkdir -p .claude/skills/incident-response
+cat > .claude/skills/incident-response/SKILL.md <<'EOF'
+---
+name: incident-response
+description: 事故响应 runbook：定位、沟通、复盘。用户询问故障 / 值班时使用。
+keywords: [incident, 故障, 事故, on-call, 值班, 复盘]
+---
 
-1. 接收用户问题
-2. 读取所有工具的 `description`（即函数的 docstring）
-3. LLM 判断哪个工具的描述最匹配用户意图
-4. 自动提取参数并调用该工具
-5. 将工具返回结果整合成最终回答
+# 事故响应
+
+## 定位
+…
+EOF
+```
+
+下次 `python -m datamind chat`（执行 `agent.warmup()` 时）就会加载。

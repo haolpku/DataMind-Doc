@@ -5,55 +5,55 @@ permalink: /zh/guide/benchmark/quickstart/
 createTime: 2026/03/30 23:43:20
 ---
 
-# 运行测评
+# Benchmark
 
-`benchmark/` 包提供 DataMind 的并发推理测评，直接调用 Python API（不经过 HTTP）。
+`benchmark/` 包提供并发推理测评，调用 Python API（不走 HTTP）。它是为 **v0.1 legacy 栈** 写的，现在仍能用；v0.2 原生的 benchmark 会在后续 Phase 加上。
 
-## 功能
+::: tip
+v0.2 的端到端功能验证由 `hello_<cap>.py` 冒烟脚本和 `pytest datamind/tests/` 覆盖。`benchmark/` 用来大规模跑吞吐 / 准确率。
+:::
 
-- 可配置的并发数
-- 每个请求独立的 Session 隔离（无记忆交叉污染）
+## 特性
+
+- 并发度可配置（asyncio semaphore）
+- 每请求独立 session（记忆互不污染）
 - 实时进度条
 - 延迟统计（Avg / P50 / P90 / P95 / Max）
-- 吞吐量（QPS）
-- 可选 `reference_answer` 透传用于评估
+- 吞吐（QPS）
+- 可选 `reference_answer` 透传，配合 evaluate 计准确率
 
 ## 问题集格式
 
-JSONL，每行一个 JSON：
+JSONL，一行一个 JSON：
 
 ```jsonl
-{"question": "RAG的核心原理是什么？"}
-{"question": "When was X born?", "reference_answer": "1982", "question_id": "q_001"}
+{"question": "什么是 RAG？"}
+{"question": "X 是哪一年出生的？", "reference_answer": "1982", "question_id": "q_001"}
 ```
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `question` | string | 是 | 问题文本 |
-| `reference_answer` | string | 否 | 标准答案（用于评估） |
-| `question_id` | string | 否 | 问题 ID（用于追踪） |
+| 字段 | 类型 | 必需 | 说明 |
+|---|---|---|---|
+| `question` | string | 是 | 发给 Agent 的问题 |
+| `reference_answer` | string | 否 | 标准答案（evaluate 时用） |
+| `question_id` | string | 否 | 追踪 id |
 
 ## 用法
 
 ```bash
-# 基础用法（默认 5 并发）
+# 基础（5 并发）
 python -m benchmark.run --questions data/bench/2wiki.jsonl
 
-# 指定并发数
+# 指定并发
 python -m benchmark.run --questions data/bench/2wiki.jsonl --concurrency 50
 
 # 指定输出文件
 python -m benchmark.run --questions data/bench/2wiki.jsonl --output results.json
 
-# 切换 data profile（使用不同的知识库）
+# 切换 profile（用 v0.1 配置变量 LLM_MODEL / RETRIEVER_MODE / …）
 DATA_PROFILE=2wiki python -m benchmark.run --questions data/bench/2wiki.jsonl
-
-# 组合: 不同 profile + 不同检索策略
-DATA_PROFILE=2wiki RETRIEVER_MODE=multi_query SIMILARITY_TOP_K=5 LLM_MODEL=gpt-4o \
-  python -m benchmark.run --questions data/bench/2wiki.jsonl --concurrency 50
 ```
 
-### 通过环境变量切换配置
+### 通过环境变量切配置（legacy）
 
 ```bash
 RETRIEVER_MODE=multi_query python -m benchmark.run --questions data/bench/2wiki.jsonl
@@ -61,32 +61,12 @@ LLM_MODEL=gpt-4o python -m benchmark.run --questions data/bench/2wiki.jsonl
 SIMILARITY_TOP_K=5 python -m benchmark.run --questions data/bench/2wiki.jsonl
 ```
 
-### 多模态 RAG 测评
-
-对包含图片的知识库跑 benchmark 时，需要同时设置 `IMAGE_EMBEDDING_MODE`：
-
-```bash
-# vlm_describe 模式：VLM 将图片描述为文本后 embedding
-DATA_PROFILE=mm_demo IMAGE_EMBEDDING_MODE=vlm_describe \
-  python -m benchmark.run --questions data/bench/mm_questions.jsonl --concurrency 5
-
-# clip 模式：CLIP 做图文统一 embedding
-DATA_PROFILE=mm_demo IMAGE_EMBEDDING_MODE=clip \
-  python -m benchmark.run --questions data/bench/mm_questions.jsonl --concurrency 5
-```
-
-多模态 benchmark 的注意事项：
-
-- **首次延迟较高**：`vlm_describe` 模式首次运行需为每张图片调用 VLM API 生成描述，构建索引会较慢。索引建好后后续运行直接加载，延迟恢复正常。
-- **图片需在 profile 目录内**：`image_path` 是相对于 `data/profiles/{profile}/` 的路径，确保图片文件存在。
-- **问题应涉及图片内容**：多模态 benchmark 的问题集应包含需要从图片中提取信息才能回答的问题，否则和纯文本 benchmark 无区别。
-
 ## 输出
 
-### 终端输出
+### 终端
 
 ```
-[INFO] 加载了 1000 个问题 (360 条含参考答案)，并发数: 50
+[INFO] Loaded 1000 questions (360 with reference answers), concurrency: 50
 
   Running 1000 queries (concurrency=50) ...
   [████████████████████████████████████████] 1000/1000 (100.0%)
@@ -106,9 +86,7 @@ DATA_PROFILE=mm_demo IMAGE_EMBEDDING_MODE=clip \
 ==================================================
 ```
 
-### JSON 结果文件
-
-每条记录：
+### JSON 记录
 
 ```json
 {
@@ -122,32 +100,32 @@ DATA_PROFILE=mm_demo IMAGE_EMBEDDING_MODE=clip \
 }
 ```
 
-`reference_answer` 和 `question_id` 仅在问题集包含这些字段时才会出现。
+## 公开 RAG 数据集
 
-## 使用公开 RAG 数据集
+推荐 [A-RAG Benchmark](https://huggingface.co/datasets/Ayanami0730/rag_test)：
 
-推荐使用 [A-RAG Benchmark](https://huggingface.co/datasets/Ayanami0730/rag_test)：
-
-| 数据集 | Chunks | Questions | 特点 |
-|--------|--------|-----------|------|
-| `2wikimultihop` | 658 | 1,000 | 多跳推理，体积最小 |
+| 数据集 | Chunks | Questions | 说明 |
+|---|---|---|---|
+| `2wikimultihop` | 658 | 1,000 | 多跳推理 |
 | `hotpotqa` | 1,311 | 1,000 | 多跳推理 |
 | `musique` | 1,354 | 1,000 | 2-4 跳推理 |
-| `medical` | 225 | 2,062 | 医学领域 |
-| `novel` | 1,117 | 2,010 | 长文本文学 |
+| `medical` | 225 | 2,062 | 医疗领域 |
+| `novel` | 1,117 | 2,010 | 长篇文学 |
 
-数据转换方法参见 [数据格式](../advanced/data-format.md)。
+看 [数据格式](../advanced/data-format.md) 把它们转成 DataMind 用的 `chunks/*.jsonl`。
 
-## 参考数据
+## 参考结果
 
-以下为 2WikiMultiHop 数据集（658 chunks, gpt-4o）在不同并发下的实测结果：
+2WikiMultiHop，658 chunks，`gpt-4o`（v0.1 stack）：
 
-| 并发数 | 问题数 | 错误 | Wall Time | Avg Latency | P50 | P95 | 吞吐量 |
-|--------|--------|------|-----------|-------------|-----|-----|--------|
+| 并发 | 题数 | 错误 | 墙钟 | Avg | P50 | P95 | 吞吐 |
+|---|---|---|---|---|---|---|---|
 | 3 | 20 | 0 | 56.1s | 6.32s | 4.75s | 32.99s | 0.36 QPS |
 | 30 | 20 | 0 | 16.1s | 7.33s | 7.28s | 16.12s | 1.24 QPS |
 | 50 | 1000 | 0 | 168.1s | 8.10s | 7.04s | 15.61s | 5.95 QPS |
 
-准确率（reference answer 包含在回复中）：**36.0%**
+准确率（参考答案被包含在生成答案里）：36.0%。2WikiMultiHop 是多跳，可以 `RETRIEVER_MODE=multi_query` 或加大 `SIMILARITY_TOP_K` 提高召回。
 
-> 2WikiMultiHop 是多跳推理数据集，单次向量检索 top_k=3 天然较难。可通过 `RETRIEVER_MODE=multi_query` 或增大 `SIMILARITY_TOP_K` 来提升召回率。
+## Roadmap
+
+v0.2 原生的 benchmark（直接调 `AgentLoop.run_turn` / `/api/chat`，准确统计 tool_use）会在后续 Phase 补上。JSONL 题集格式和输出 JSON 格式保持一致，旧结果文件仍可继续用。

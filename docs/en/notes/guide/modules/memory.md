@@ -5,65 +5,103 @@ permalink: /en/guide/modules/memory/
 createTime: 2026/03/30 23:39:35
 ---
 
-# Memory — Conversation Memory
+# Memory
 
-Memory gives the Agent the ability to understand multi-turn conversation context through short-term and long-term memory mechanisms.
-
-## How It Works
+Three layers, one service:
 
 ```
-User Message → Store in Short-term Memory (FIFO queue)
-                    │
-                    ▼
-         Short-term full? ──Yes──→ Overflow messages → Long-term Memory
-                    │                                       │
-                    No                                      ▼
-                    │                            LLM extracts key info
-                    │                            Stored as MemoryBlock
-                    ▼
-            Agent reads memory:
-            Short-term (full messages) + Long-term (key info summaries)
-            Both sent to LLM as context
+┌────────────────────────────────────────────────────┐
+│  Short-term — ShortTermMemory (per-session deque)  │  in-RAM, dropped on restart
+└────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│  Long-term — MemoryStore (Protocol)                │
+│    • SQLite (default) — embedding cosine recall    │  persisted under storage/<profile>/memory.db
+│    • Redis / Postgres — future providers           │
+└────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│  Fact extractor — cheap LLM call at turn boundary  │
+│    (user_turn + assistant_turn) -> JSON list       │
+│    facts → long-term store                         │
+└────────────────────────────────────────────────────┘
 ```
 
-## Short-term Memory
+## Namespaces
 
-- FIFO (First In, First Out) message queue
-- Stores recent `ChatMessage` objects
-- Has a token limit; oldest messages are evicted when exceeded
-- Default: 70% of total token budget (`CHAT_HISTORY_TOKEN_RATIO = 0.7`)
+Every long-term item lives in a namespace. The conventions we use:
 
-## Long-term Memory
+| Prefix | Scope |
+|---|---|
+| `session:<id>` | One conversation |
+| `user:<id>` | Cross-session, per user |
+| `global` | System-wide knowledge |
 
-- Triggered automatically when short-term memory overflows
-- Overflowed messages are processed by `MemoryBlock`
-- LLM extracts key information (facts, preferences, important details)
-- Extracted info is stored as summaries
-- Both long-term summaries and short-term messages are sent to the LLM
+Set the default namespace for the active session when assembling:
+
+```python
+agent = await build_agent(settings, default_memory_namespace="session:abc")
+```
+
+## Tools exposed to the agent
+
+| Tool | Purpose |
+|---|---|
+| `memory_save` | Persist one fact. Auto-namespace = default unless caller overrides. |
+| `memory_recall` | Top-K semantic recall over a namespace. |
+| `memory_forget` | Delete by id (get the id from `memory_recall` first). |
+| `memory_list_namespaces` | List every populated namespace. |
+
+## LLM-driven fact extraction
+
+At the end of a turn you can call:
+
+```python
+facts = await agent.memory.extract_and_save(
+    "session:abc",
+    user_turn="I'm moving to Shenzhen next month and will start jogging in the morning.",
+    assistant_turn="Nice — Shenzhen in April is great for outdoor runs.",
+)
+# ["User is moving to Shenzhen next month",
+#  "User plans to start jogging in the morning"]
+```
+
+Uses the `fallback_model` (Haiku by default — cheap) with a tight extraction prompt. Extraction runs once per turn; recall is O(namespace size) cosine.
+
+## Semantic vs lexical recall
+
+`SQLiteMemoryStore` falls back to word-overlap scoring when no embedding is available. That keeps the capability working in environments with no LLM key (e.g. unit tests).
 
 ## Configuration
 
-In `.env`:
-
 ```bash
-MEMORY_TOKEN_LIMIT=30000           # Total token budget (short + long)
-CHAT_HISTORY_TOKEN_RATIO=0.7       # Short-term memory ratio
+DATAMIND__MEMORY__BACKEND=sqlite            # sqlite | redis | postgres (future)
+# DATAMIND__MEMORY__DSN=
+DATAMIND__MEMORY__SHORT_TERM_TURNS=20
+DATAMIND__MEMORY__LONG_TERM_ENABLED=true
 ```
 
-- `MEMORY_TOKEN_LIMIT=30000` ≈ ~15,000 Chinese characters of conversation history
-- Higher ratio → more recent conversation retained, less long-term memory
-- Lower ratio → less short-term context, more historical key information
-
-## Multi-Session Support
+Adding a backend:
 
 ```python
-from core.session import SessionManager
-
-session_mgr = SessionManager()
-memory_user_a = session_mgr.get_memory("user_a")
-memory_user_b = session_mgr.get_memory("user_b")
+@memory_registry.register("redis")
+class RedisMemoryStore:
+    async def save(...): ...
+    async def recall(...): ...
+    async def forget(...): ...
+    async def list_namespaces(...): ...
 ```
 
-## Lifecycle
+## Verify it
 
-Memory is **not persisted across restarts** in the current version. Each program restart begins with empty memory. For cross-session persistence, consider integrating Mem0 or Zep.
+```bash
+python -m datamind.scripts.hello_memory
+```
+
+```
+[hello_memory] memory_recall: "What do we know about Ann's coffee preference?"
+  score=0.587  Ann takes oat milk in her coffee.
+  score=0.518  The user's name is Ann.
+
+[hello_memory] extracted 2 fact(s):
+  - User is moving to Shenzhen next month
+  - User plans to start jogging in the morning
+```

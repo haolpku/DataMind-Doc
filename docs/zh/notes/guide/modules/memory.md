@@ -5,64 +5,102 @@ permalink: /zh/guide/modules/memory/
 createTime: 2026/03/30 23:42:51
 ---
 
-# Memory — 对话记忆
+# Memory
 
-Memory 模块提供对话记忆能力，让 Agent 能理解多轮对话的上下文。
-
-## 工作原理
+三层，同一个 service：
 
 ```
-用户消息 → 存入短期记忆 (FIFO 队列)
-                  │
-                  ▼
-         短期记忆满了？ ──是──→ 溢出的消息 → 长期记忆
-                  │                              │
-                  否                              ▼
-                  │                     LLM 提取关键信息
-                  │                     存为 MemoryBlock
-                  ▼
-          Agent 读取记忆:
-          短期记忆(完整消息) + 长期记忆(关键信息摘要)
-          一起作为上下文传给 LLM
+┌────────────────────────────────────────────────────┐
+│  短期 — ShortTermMemory（每 session 一个 deque）    │  内存存，重启丢
+└────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│  长期 — MemoryStore（Protocol）                     │
+│    • SQLite（默认）—— 余弦相似度召回                │  落盘到 storage/<profile>/memory.db
+│    • Redis / Postgres —— 未来 provider              │
+└────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│  事实抽取 — 每轮末尾跑一次廉价 LLM                  │
+│    (user_turn + assistant_turn) -> JSON list        │
+│    抽出的 facts 写入长期记忆                        │
+└────────────────────────────────────────────────────┘
 ```
 
-## 短期记忆
+## Namespace
 
-- **FIFO（先进先出）消息队列**
-- 存储最近的 `ChatMessage` 对象
-- 有 token 上限，超出后最旧的消息被移出
-- 默认占总 token 预算的 70%（`CHAT_HISTORY_TOKEN_RATIO = 0.7`）
+每条长期记忆都落在一个 namespace 下。常用前缀：
 
-## 长期记忆
+| 前缀 | 范围 |
+|---|---|
+| `session:<id>` | 一次对话 |
+| `user:<id>` | 跨 session，按用户 |
+| `global` | 系统级 |
 
-- 当短期记忆溢出时自动触发
-- 溢出的消息被 `MemoryBlock` 处理
-- LLM 从旧消息中提取关键信息（事实、偏好、重要细节）
-- 提取的信息以摘要形式长期保存
-
-## 配置参数
-
-在 `.env` 中调整：
-
-```bash
-MEMORY_TOKEN_LIMIT=30000           # 短期+长期记忆的总 token 上限
-CHAT_HISTORY_TOKEN_RATIO=0.7       # 短期记忆占比 (0.7 = 70%)
-```
-
-- `MEMORY_TOKEN_LIMIT=30000` ≈ ~15000 个中文字的对话历史
-- 调高比例 → 记住更多最近对话，但长期记忆减少
-- 调低比例 → 短期记忆更少，但能记住更多历史关键信息
-
-## 多 Session 支持
+装配时给当前 session 设置默认 namespace：
 
 ```python
-from core.session import SessionManager
-
-session_mgr = SessionManager()
-memory_user_a = session_mgr.get_memory("user_a")
-memory_user_b = session_mgr.get_memory("user_b")
+agent = await build_agent(settings, default_memory_namespace="session:abc")
 ```
 
-## 生命周期
+## 工具清单
 
-当前版本的 Memory **不会跨 session 持久化**。每次重启程序记忆重新开始。如需跨 session 的持久化记忆，可以集成 Mem0 或 Zep。
+| 工具 | 作用 |
+|---|---|
+| `memory_save` | 存一条事实，namespace 默认用装配时给的；可用参数覆盖 |
+| `memory_recall` | 在某个 namespace 里做 top-K 语义召回 |
+| `memory_forget` | 按 id 删（id 从 `memory_recall` 拿） |
+| `memory_list_namespaces` | 列出所有已填充的 namespace |
+
+## LLM 事实抽取
+
+每轮对话末尾可以调：
+
+```python
+facts = await agent.memory.extract_and_save(
+    "session:abc",
+    user_turn="I'm moving to Shenzhen next month and will start jogging in the morning.",
+    assistant_turn="Nice — Shenzhen in April is great for outdoor runs.",
+)
+# ["User is moving to Shenzhen next month",
+#  "User plans to start jogging in the morning"]
+```
+
+用 `fallback_model`（默认 Haiku，便宜）跑极精简 prompt。抽取每轮一次，召回是 O(namespace 大小) 的余弦计算。
+
+## 语义 vs 词法召回
+
+`SQLiteMemoryStore` 在没 embedding 的情况下降级为词法打分（词重叠）。这样即使没 LLM key 也能跑（单测就是这么做的）。
+
+## 配置
+
+```bash
+DATAMIND__MEMORY__BACKEND=sqlite            # sqlite | redis (future) | postgres (future)
+# DATAMIND__MEMORY__DSN=
+DATAMIND__MEMORY__SHORT_TERM_TURNS=20
+DATAMIND__MEMORY__LONG_TERM_ENABLED=true
+```
+
+新增 backend：
+
+```python
+@memory_registry.register("redis")
+class RedisMemoryStore:
+    async def save(...): ...
+    async def recall(...): ...
+    async def forget(...): ...
+    async def list_namespaces(...): ...
+```
+
+## 验证
+
+```bash
+python -m datamind.scripts.hello_memory
+```
+
+```
+[hello_memory] memory_recall: "What do we know about Ann's coffee preference?"
+  score=0.587  Ann takes oat milk in her coffee.
+
+[hello_memory] extracted 2 fact(s):
+  - User is moving to Shenzhen next month
+  - User plans to start jogging in the morning
+```

@@ -5,72 +5,105 @@ permalink: /en/guide/modules/skills/
 createTime: 2026/03/30 23:39:24
 ---
 
-# Skills — Extensible Tool System
+# Skills
 
-Skills are the most flexible extension mechanism — any Python function can become an Agent tool.
+The Skills capability has two faces:
 
-## Built-in Skills
+1. **Knowledge skills** — Markdown SOPs/runbooks the model can search semantically.
+2. **Code skills** — Safe Python utilities (calculator, unit converter, current time, text analyzer) the model can call directly.
 
-| Skill | Function | Description |
-|-------|----------|-------------|
-| Current Time | `get_current_time` | Get current date and time |
-| Calculator | `calculator` | Precise math calculations |
-| Text Analysis | `analyze_text` | Count words, lines, paragraphs |
-| Unit Converter | `unit_convert` | Length, weight, temperature conversion |
+Both live under one `ToolRegistry`.
 
-## Adding a New Skill
+## Knowledge skills — `.claude/skills/<name>/SKILL.md`
 
-### Step 1: Write a Python function
+Format follows the Agent SDK convention: YAML frontmatter + Markdown body.
 
-Edit `modules/skills/tools.py`:
+```markdown
+---
+name: code-review
+description: Comprehensive code review guidance — process, checklist, feedback conventions. Use when the user asks about code review flow, review criteria, best practices, or how to give/receive review feedback.
+keywords: [code review, 代码审查, PR, pull request, review]
+---
+
+# 代码审查指南
+
+## 适用场景
+…
+```
+
+At startup `SkillsService.load()`:
+- Discovers every `.claude/skills/<dir>/SKILL.md`.
+- Parses frontmatter (our hand-rolled parser needs no YAML dep).
+- Indexes `description + body` into a dedicated Chroma collection (`skills`), so `skill_search` finds the best skill by semantic similarity.
+
+## Code skills
+
+Live in `datamind/capabilities/skills/code_skills.py`:
+
+| Tool | Purpose |
+|---|---|
+| `calculator` | Safe `eval` against a pinned math namespace: `sqrt sin cos tan log exp pow abs floor ceil pi e min max round sum`. Rejects `__` / `import` / `exec` / etc. |
+| `unit_convert` | Table-driven length / mass / temperature conversions |
+| `get_current_time` | Local date + weekday |
+| `analyze_text` | Char / line / paragraph / word counts |
+
+Adding a new one is three lines:
 
 ```python
-def my_new_skill(param1: str, param2: int = 10) -> str:
-    """Tool description — the Agent uses this to decide when to call it.
-    param1: description of param1
-    param2: description of param2, defaults to 10
-    """
-    result = do_something(param1, param2)
-    return f"Result: {result}"
+async def _uuid4() -> dict:
+    import uuid
+    return {"uuid": str(uuid.uuid4())}
+
+SPECS.append(ToolSpec(
+    name="uuid4",
+    description="Generate a random UUID v4.",
+    input_schema={"type": "object", "properties": {}},
+    handler=_uuid4,
+    metadata={"group": "skill.code"},
+))
 ```
 
-Key requirements:
-- The **docstring is critical** — the Agent decides when to invoke the tool based entirely on it
-- Parameters need **type annotations** (`str`, `int`, `float`, etc.)
-- Return type is `str`
-- Describe **when to use** and **parameter meanings** in the docstring
+## Tools exposed to the agent
 
-### Step 2: Register in `get_all_skills()`
+| Tool | Purpose |
+|---|---|
+| `skill_search` | Semantic search across knowledge skills |
+| `skill_get` | Return the full Markdown body for a named skill |
+| `skill_list` | List every registered knowledge skill |
+| `calculator`, `unit_convert`, `get_current_time`, `analyze_text` | Code skills |
 
-```python
-def get_all_skills() -> list:
-    return [
-        FunctionTool.from_defaults(fn=get_current_time),
-        FunctionTool.from_defaults(fn=calculator),
-        FunctionTool.from_defaults(fn=analyze_text),
-        FunctionTool.from_defaults(fn=unit_convert),
-        FunctionTool.from_defaults(fn=my_new_skill),   # add here
-    ]
+## Example
+
+```bash
+python -m datamind.scripts.hello_skills
 ```
 
-No other files need to change. Restart and the new skill is available.
-
-## Knowledge Skills
-
-Beyond tool functions, DataMind also supports **knowledge skills** — Markdown documents placed in `data/skills/` that are indexed and searchable:
-
 ```
-data/skills/
-├── database-ops-sop.md
-└── code-review-guide.md
+skill_search 'how should I review a pull request?'
+  score=0.513  name=code-review
+  score=0.194  name=db-ops-sop
+
+skill_search '慢查询怎么排查'
+  score=0.392  name=db-ops-sop
+  score=0.330  name=code-review
 ```
 
-The Agent uses `skill_search` to find relevant procedures and best practices from these documents.
+Writing a new skill is **one file** with zero code changes:
 
-## How the Agent Decides
+```bash
+mkdir -p .claude/skills/incident-response
+cat > .claude/skills/incident-response/SKILL.md <<'EOF'
+---
+name: incident-response
+description: Outage runbook — triage, comms, post-mortem. Use when the user asks about incidents or on-call duties.
+keywords: [incident, outage, on-call, post-mortem]
+---
 
-1. Receives user question
-2. Reads all tool descriptions (docstrings)
-3. LLM judges which tool best matches the intent
-4. Extracts parameters and calls the tool
-5. Integrates tool output into the final answer
+# Incident Response
+
+## Triage
+…
+EOF
+```
+
+The next `python -m datamind chat` will pick it up after calling `agent.warmup()`.

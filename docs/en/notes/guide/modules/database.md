@@ -5,92 +5,96 @@ permalink: /en/guide/modules/database/
 createTime: 2026/03/30 23:42:30
 ---
 
-# Database — Natural Language Database Queries
+# Database (NL2SQL)
 
-The Database module uses SQLite and SQLAlchemy to turn natural language into SQL queries.
+The DB capability lets the agent run **read-only** SQL against any SQLAlchemy-supported engine. Built-in dialects: SQLite, MySQL. Postgres / DuckDB are one file away.
 
-## How it works
+## Tools exposed to the agent
 
-User question → LLM generates SQL → SQLite executes → results are returned
+| Tool | What it does |
+|---|---|
+| `db_list_tables` | `SHOW TABLES` equivalent — also includes views |
+| `db_describe_table` | Columns (names + types + PK + nullability) + row-count estimate |
+| `db_query_sql` | Execute a single SELECT; row-limited, timeout-bounded, destructive-safe |
+| `db_query_nl` | LLM generates SQL from a natural-language question, then runs it |
 
-## Data loading
+## Three layers of safety
 
-The system **detects the data source automatically** in this order:
+Even if the model hallucinates `DELETE`, the dialect will refuse it:
 
-1. `data/profiles/{profile}/tables/*.sql` → run SQL files to create tables and insert data
-2. If no SQL files are present → fall back to the built-in demo employee database
+1. **Syntactic check** — leading verb must not be in `{INSERT, UPDATE, DELETE, REPLACE, DROP, CREATE, ALTER, TRUNCATE, RENAME, GRANT, REVOKE, ATTACH, DETACH, CALL, EXEC, BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, LOAD, COPY, KILL, LOCK, UNLOCK, PRAGMA}`.
+2. **Multi-statement rejection** — `SELECT 1; DELETE …` is blocked; string literals are masked first so `SELECT ';' FROM t` is fine.
+3. **Row-limit wrapping** — every statement is wrapped `SELECT * FROM (<user-sql>) LIMIT <row_limit+1>` and the result is marked `truncated=True` if the limit was hit.
 
-You do not need to change code; table names are discovered and Agent tool descriptions are configured accordingly.
+Additionally, per-dialect hooks strengthen the guard:
 
-### Method A: SQL file import (recommended)
+- **SQLite**: `PRAGMA query_only = ON` at the start of each connection.
+- **MySQL**: `SET SESSION TRANSACTION READ ONLY` (privilege-dependent; the safeguards above catch it when that fails).
 
-Place `.sql` files under `data/profiles/{profile}/tables/`:
+## NL2SQL
 
-```
-data/profiles/mydata/tables/
-├── 01_schema.sql     ← DDL (executed in filename order)
-└── 02_data.sql       ← INSERT data
-```
-
-**01_schema.sql** (example DDL):
-
-```sql
-CREATE TABLE employees (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  department TEXT,
-  position TEXT,
-  salary REAL,
-  city TEXT
-);
-
-CREATE TABLE projects (
-  id INTEGER PRIMARY KEY,
-  project_name TEXT NOT NULL,
-  lead_employee_id INTEGER,
-  budget REAL,
-  status TEXT
-);
+```python
+await service.query_nl("How many engineers in Shanghai?", tables=["employees"])
 ```
 
-**02_data.sql** (example inserts):
+Flow:
+1. `db_describe_table` is called for every table (or just the `tables=` subset).
+2. A compact schema block is built: `TABLE employees (~5 rows): id INTEGER PK, name TEXT NOT NULL, …`.
+3. Claude generates **one** SELECT. Code fences and trailing semicolons are stripped.
+4. The SQL goes through `execute_readonly`, which re-runs the safeguards.
 
-```sql
-INSERT INTO employees (id, name, department, position, salary, city) VALUES
-  (1, 'Alice', 'Engineering', 'Developer', 25000, 'Beijing'),
-  (2, 'Bob', 'Marketing', 'Manager', 30000, 'Shanghai');
+Observed recovery: if the model emits a column that doesn't exist, the safeguard error propagates as a tool_result, the agent reads it, calls `db_describe_table`, and re-writes the SQL.
 
-INSERT INTO projects (id, project_name, lead_employee_id, budget, status) VALUES
-  (1, 'Product A', 1, 500000, 'active'),
-  (2, 'Product B', 2, 800000, 'planned');
+## Configuration
+
+```bash
+DATAMIND__DB__DIALECT=sqlite              # sqlite | mysql | …
+# SQLite (default): leaves DSN blank, creates storage/<profile>/demo.db
+# DATAMIND__DB__DSN=
+
+# MySQL
+# DATAMIND__DB__DIALECT=mysql
+# DATAMIND__DB__DSN=mysql+pymysql://user:pw@host:3306/dbname
+# Install the extra once: pip install -e '.[mysql]'
+
+# Postgres (future)
+# DATAMIND__DB__DIALECT=postgres
+# DATAMIND__DB__DSN=postgresql+psycopg://user:pw@host:5432/db
+
+DATAMIND__DB__READ_ONLY=true
+DATAMIND__DB__ROW_LIMIT=1000
+DATAMIND__DB__QUERY_TIMEOUT_S=10.0
 ```
 
-Files are executed in sorted filename order; use numeric prefixes to control order.
+## Adding a dialect
 
-### Method B: Provide a SQLite file directly
+```python
+# datamind/capabilities/db/providers/postgres.py
+from datamind.core.registry import db_registry
+from ..base import BaseSQLDialect
 
-Put your database at `storage/{profile}/demo.db`.
+@db_registry.register("postgres")
+class PostgresDialect(BaseSQLDialect):
+    name = "postgres"
 
-### Recommended data types
+    def build_engine(self, dsn, **kwargs):
+        if not dsn or not dsn.startswith(("postgres", "postgresql")):
+            raise ConfigError("invalid postgres DSN")
+        return super().build_engine(dsn, **kwargs)
 
-| Python / CSV type | SQLite type | Notes |
-|-------------------|-------------|-------|
-| int | INTEGER | IDs, counts, integers |
-| float | REAL | Prices, scores, percentages |
-| str | TEXT | Names, descriptions, categories |
-| date / datetime | TEXT | Prefer `YYYY-MM-DD` strings |
-| bool | INTEGER | Use 0 / 1 |
+    def _before_query(self, conn):
+        conn.execute(text("SET TRANSACTION READ ONLY"))
 
-## Demo data
+    def _quote_ident(self, name):
+        return '"' + name.replace('"', '""') + '"'
+```
 
-The built-in demo has **employees** (8 rows) and **projects** (4 rows).
+Then add `from . import postgres  # noqa: F401` to `providers/__init__.py`. No other file changes.
 
-## Web UI
+## Verify it
 
-Open the **Database** panel → inspect table schemas → use **View data** to preview rows.
+```bash
+python -m datamind.scripts.hello_db
+```
 
-## Security
-
-- NL2SQL runs LLM-generated SQL and carries inherent risk
-- Prefer **read-only** database connections
-- Do not point this at production databases that hold sensitive data
+Seeds a tiny employees + projects schema, runs SQL, NL2SQL, and verifies `DELETE` is rejected.

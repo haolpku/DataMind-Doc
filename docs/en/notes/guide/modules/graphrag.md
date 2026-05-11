@@ -1,96 +1,100 @@
 ---
-title: GraphRAG
+title: Graph
 icon: carbon:chart-relationship
 permalink: /en/guide/modules/graphrag/
 createTime: 2026/03/30 23:42:14
 ---
 
-# GraphRAG — Knowledge Graph Retrieval
+# Knowledge Graph
 
-GraphRAG performs multi-hop reasoning over entities and relations in a knowledge graph. It is well suited to questions where understanding complex links between entities matters.
+The Graph capability stores `(subject, relation, object)` triples in a `GraphStore` and lets the agent traverse them.
 
-## RAG vs GraphRAG
+Default backend: **NetworkX**, persisted as a single JSON file at `storage/<profile>/graph.json`. Good for up to ~100k edges; swap for Neo4j by registering another provider.
 
-| | RAG (Vector) | GraphRAG (Graph) |
-|---|---|---|
-| Best for | "What is X?" | "How are A and B related?" |
-| Retrieval | Semantic similarity | Entity-relation traversal |
-| Strength | Single-hop fact lookup | Multi-hop reasoning, relational understanding |
-| Storage | Vector DB (Chroma) | Property Graph (NetworkX) |
+## Ingesting triples
 
-## Data Ingestion
+Two modes:
 
-### Method A: Automatic extraction (default)
+### A. From profile JSONL
 
-GraphRAG shares the same profile directory as RAG. An LLM extracts entities and relations from your documents.
+Drop files under `data/profiles/<profile>/triplets/*.jsonl`, one object per line:
 
-**Tips for better extraction**:
+```jsonl
+{"subject": "Ann", "relation": "leads", "object": "Search platform"}
+{"subject": "Acme", "relation": "located_in", "object": "Shanghai", "confidence": 1.0}
+```
 
-- Keep entity names consistent in the text (e.g. always use the full name instead of mixing nicknames and titles)
-- Write paragraphs around clear entities and relations
-- Reduce noise (headers, footers, tables of contents, copyright notices, etc.)
+Then warmup will load them automatically:
 
-### Method B: Pre-built triplets (JSONL)
+```python
+await agent.warmup()
+# -> calls graph.load_from_profile()
+```
 
-Place JSONL files under `data/profiles/{profile}/triplets/`:
+### B. Via the `graph_upsert_triples` tool
 
-| Field | Type | Required | Description |
-|------|------|----------|-------------|
-| `subject` | string | Yes | Subject entity |
-| `relation` | string | Yes | Relation type |
-| `object` | string | Yes | Object entity |
-| `subject_type` | string | No | Subject type (e.g. `"Person"`); default `"entity"` |
-| `object_type` | string | No | Object type (e.g. `"Organization"`); default `"entity"` |
-| `subject_properties` | object | No | Extra subject attributes (reserved for multimodal, e.g. `{"image": "img/a.png"}`) |
-| `object_properties` | object | No | Extra object attributes (multimodal reserved) |
-| `confidence` | float | No | Confidence score (default 1.0) |
-| `source` | string | No | Source identifier |
-
-Examples:
+Useful when the user tells the agent to remember a fact:
 
 ```json
-{"subject": "Entity A", "relation": "works_at", "object": "Entity B"}
-{"subject": "Entity A", "relation": "works_at", "object": "Entity B", "subject_type": "Person", "object_type": "Organization"}
+{
+  "triples": [
+    {"subject": "Ann", "relation": "manages", "object": "Bob"},
+    {"subject": "Bob", "relation": "works_on", "object": "Search platform"}
+  ]
+}
 ```
 
-## Auto-detection priority
+## Data model
 
-1. If a graph index already exists → load it directly
-2. If `profiles/{profile}/triplets/*.jsonl` exists → Method B (import without LLM)
-3. If there are documents under `profiles/{profile}/` → Method A (LLM extraction)
+Each triple maps to:
 
-## Graph visualization
+- A **node** for `subject` and `object` (with `label` defaulting to the id and `type` defaulting to `"entity"`).
+- An **edge** keyed by the relation, carrying `weight = confidence` and any properties.
 
-After building, the graph is saved as an interactive HTML file:
+Node `type` and edge `relation` are free strings — set a convention and stick to it.
 
-```
-storage/{profile}/graph/knowledge_graph.html
-```
+## Tools exposed to the agent
 
-Open it in a browser to explore entities and relations.
+| Tool | What it does |
+|---|---|
+| `graph_search_entities` | Exact + fuzzy name match against node ids/labels |
+| `graph_traverse` | BFS out to `max_hops`, optionally filtered by allowed `relation_filter`. Returns paths sorted by avg edge weight. |
+| `graph_neighbors` | Every in/out edge for one node (direction: `both` / `out` / `in`) |
+| `graph_upsert_triples` | Add / update triples (marked destructive) |
 
-## Tuning extraction parameters
+## Example walkthrough
 
-When reading documents from the profile directory, the default is `SimpleLLMPathExtractor` for entity and relation extraction.
-
-```python
-kg_extractor = SimpleLLMPathExtractor(max_paths_per_chunk=10)
-```
-
-For stricter extraction with predefined entity and relation types:
-
-```python
-from llama_index.core.indices.property_graph import SchemaLLMPathExtractor
-
-kg_extractor = SchemaLLMPathExtractor(
-    possible_entities=["Person", "Company", "Product", "Technology"],
-    possible_relations=["developed", "belongs_to", "uses", "located_in"],
-)
+```bash
+python -m datamind.scripts.hello_graph
 ```
 
-## Web UI
+With these seed triples:
 
-In the **GraphRAG** panel you can:
+```
+Ann      —leads→        Search platform
+Bob      —member_of→    Search platform
+Search — part_of→       Acme Engineering
+Acme     —located_in→   Shanghai
+Shanghai —in_country→   China
+```
 
-- Browse all entities and relations
-- Rebuild the knowledge graph
+3-hop traverse from `Ann` returns:
+
+```
+Ann → Acme → Shanghai        [works_at | located_in]
+Ann → Project Alpha          [leads]
+Ann → Acme → Shanghai → China [works_at | located_in | in_country]
+…
+```
+
+Add `relation_filter=["works_at", "located_in", "in_country"]` to restrict the walk to the business chain.
+
+## Configuration
+
+```bash
+DATAMIND__GRAPH__BACKEND=networkx          # networkx | neo4j (future)
+# DATAMIND__GRAPH__DSN=bolt://user:pw@host:7687
+DATAMIND__GRAPH__EMBED_ENTITIES=false
+```
+
+Adding Neo4j is a new file under `datamind/capabilities/graph/providers/neo4j_store.py` plus `@graph_registry.register("neo4j")`. `build_graph_service` already routes `backend != "networkx"` through a DSN-based constructor.

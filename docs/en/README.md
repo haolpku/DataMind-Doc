@@ -8,8 +8,8 @@ config:
     background: tint-plate
     hero:
       name: DataMind
-      tagline: All-in-One Intelligent Assistant
-      text: "Data is static. Mind makes it alive."
+      tagline: Unified retrieval agent (v0.2)
+      text: "KB · Graph · DB · Skills · Memory — one agent, every source."
       actions:
         -
           theme: brand
@@ -27,27 +27,27 @@ config:
     type: features
     features:
       -
-        title: RAG
+        title: KB (Hybrid RAG)
         icon: carbon:search-locate
-        details: Semantic vector retrieval powered by Chroma. Supports raw documents and pre-chunked JSONL.
+        details: Chroma + BM25 fused with Reciprocal Rank Fusion. Three pluggable strategies (simple / multi_query / hybrid). Multi-profile isolation.
       -
-        title: GraphRAG
+        title: Graph
         icon: carbon:chart-relationship
-        details: Knowledge graph retrieval with NetworkX. Multi-hop reasoning over entities and relations.
+        details: NetworkX knowledge graph with JSON persistence. Multi-hop traversal with optional relation filters; Neo4j plug-in ready.
       -
-        title: Database
+        title: Database (NL2SQL)
         icon: carbon:data-table
-        details: Natural language to SQL. Query structured data with plain questions.
+        details: SQLite and MySQL out of the box (Postgres via one provider file). Three-layer safeguard keeps read-only truly read-only.
       -
         title: Skills
         icon: carbon:tools
-        details: Extensible tool system. Any Python function becomes an Agent skill.
+        details: "SDK-style .claude/skills/<name>/SKILL.md manifests for knowledge skills; safe Python code skills (calculator, unit conversion, …)."
       -
         title: Memory
         icon: carbon:ai-status-in-progress
-        details: Short-term + long-term conversation memory with automatic summarization.
+        details: Short-term rolling window + SQLite long-term with cosine recall + live LLM fact extraction at turn boundary.
       -
-        title: Benchmark
-        icon: carbon:meter-alt
-        details: Concurrent inference benchmarking with EM / F1 evaluation against reference answers.
+        title: Agent & Server
+        icon: carbon:machine-learning-model
+        details: Self-written tool-use loop against any Anthropic-compatible gateway. Real SSE streaming via FastAPI. No claude CLI dependency.
 ---

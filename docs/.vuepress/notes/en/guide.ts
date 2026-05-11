@@ -28,6 +28,7 @@ export const Guide: ThemeNote = defineNoteConfig({
                 'database',
                 'skills',
                 'memory',
+                'ingest',
             ],
         },
         {
